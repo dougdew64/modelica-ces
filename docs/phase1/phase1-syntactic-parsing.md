@@ -1,6 +1,6 @@
 # Phase 1: Syntactic Parsing — Implementation Details
 
-This document describes how to implement the syntactic parsing phase of the Modelica compiler in TypeScript. It covers the lexer, the parser, and the AST data structures. The overview document describes *what* this phase does; this document describes *how to build it*.
+This document describes how to implement the syntactic parsing phase of the Modelica compiler in TypeScript. It covers the lexer, the parser, and the AST data structures. The overview document describes *what* this phase does; this document describes *how to build it*. The target language version is **Modelica 3.6**.
 
 The implementation is split into three parts that are built in order, since each depends on the previous:
 
@@ -247,7 +247,12 @@ interface StoredDefinition {
   kind: "StoredDefinition";
   span: Span;
   withinPath: ComponentReference | null;  // within Package.SubPackage;
-  classDefinitions: ClassDefinition[];
+  classDefinitions: StoredClassEntry[];
+}
+
+interface StoredClassEntry {
+  isFinal: boolean;   // "final" keyword before the class definition
+  definition: ClassDefinition | ShortClassDefinition;
 }
 ```
 
@@ -274,13 +279,44 @@ interface ClassDefinition {
   span: Span;
   restriction: ClassRestriction;
   name: string;
+  isFinal: boolean;        // "final" prefix (passed in from call site)
   isEncapsulated: boolean;
   isPartial: boolean;
   isExpandable: boolean;   // for expandable connector
+  isPure: boolean;         // "pure" prefix — only valid on function restriction
+  isImpure: boolean;       // "impure" prefix — only valid on function restriction
   elements: Element[];
   equationSections: EquationSection[];
   algorithmSections: AlgorithmSection[];
   externalDecl: ExternalDeclaration | null;
+  annotation: Annotation | null;
+}
+
+// A short class definition: type X = Real(unit = "m")  or  type E = enumeration(a, b, c)
+interface ShortClassDefinition {
+  kind: "ShortClassDefinition";
+  span: Span;
+  restriction: ClassRestriction;
+  name: string;
+  isFinal: boolean;
+  isEncapsulated: boolean;
+  isPartial: boolean;
+  isExpandable: boolean;
+  isPure: boolean;
+  isImpure: boolean;
+  // For numeric/record/connector specialisations: baseType is the referenced name.
+  // For enumeration types: baseType is null, enumeration is populated.
+  baseType: ComponentReference | null;
+  arraySubscripts: Expression[];      // e.g. type T = Real[N]
+  modification: ClassModification | null;
+  enumeration: EnumerationLiteral[] | null;
+  annotation: Annotation | null;
+  comment: string | null;
+}
+
+interface EnumerationLiteral {
+  name: string;
+  comment: string | null;
   annotation: Annotation | null;
 }
 ```
@@ -353,7 +389,7 @@ interface ConstrainedByClause {
   kind: "ConstrainedByClause";
   span: Span;
   typeName: ComponentReference;
-  modification: Modification | null;
+  modification: ClassModification | null;  // only the '(...)' part; no '= expr' allowed here
 }
 ```
 
@@ -414,7 +450,8 @@ type EquationNode =
   | ConnectEquation
   | IfEquation
   | ForEquation
-  | WhenEquation;
+  | WhenEquation
+  | FunctionCallEquation;
 
 interface SimpleEquation {
   kind: "SimpleEquation";
@@ -464,6 +501,23 @@ interface WhenEquation {
   annotation: Annotation | null;
   comment: string | null;
 }
+
+// A function-call equation: name(args)
+// Used for built-in procedural statements that appear in equation sections:
+//   transition(from, to, condition, immediate, reset, synchronize, priority)
+//   initialState(state)
+//   assert(condition, message)
+//   terminate(message)
+//   reinit(variable, expression)
+//   Connections.root(n), Connections.branch(a, b), etc.
+interface FunctionCallEquation {
+  kind: "FunctionCallEquation";
+  span: Span;
+  name: ComponentReference;
+  args: FunctionArguments;
+  annotation: Annotation | null;
+  comment: string | null;
+}
 ```
 
 #### Algorithm sections
@@ -488,10 +542,18 @@ type Statement =
   | BreakStatement
   | FunctionCallStatement;
 
+// The target of an assignment can be a single variable or a tuple of variables
+// for functions that return multiple values: (a, b, c) := f(x)
+type AssignmentTarget = ComponentReference | TupleTarget;
+
+interface TupleTarget {
+  components: ComponentReference[];  // the parenthesised list: (a, b, c)
+}
+
 interface AssignmentStatement {
   kind: "AssignmentStatement";
   span: Span;
-  target: ComponentReference;
+  target: AssignmentTarget;
   value: Expression;
 }
 
@@ -561,7 +623,8 @@ type Expression =
   | ArrayConstructExpr
   | ArrayConcatExpr
   | RangeExpr
-  | EndExpr;
+  | EndExpr
+  | ColonExpr;
 
 interface IntegerLiteralExpr {
   kind: "IntegerLiteral";
@@ -660,6 +723,13 @@ interface RangeExpr {
 
 interface EndExpr {
   kind: "EndExpr";
+  span: Span;
+}
+
+// A bare ':' used as an array subscript, meaning "all indices along this dimension".
+// e.g. A[:, 1] selects the first column of matrix A.
+interface ColonExpr {
+  kind: "ColonExpr";
   span: Span;
 }
 ```
@@ -945,11 +1015,22 @@ private scanIdentifierOrKeyword(): Token {
 }
 
 function isIdentStart(ch: string): boolean {
-  return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch === "_";
+  if (ch >= "a" && ch <= "z") return true;
+  if (ch >= "A" && ch <= "Z") return true;
+  if (ch === "_") return true;
+  // Modelica 3.6 allows Unicode letters as identifier start characters.
+  // Use the Unicode 'Letter' property (covers all scripts).
+  const cp = ch.codePointAt(0)!;
+  return cp > 127 && /\p{L}/u.test(ch);
 }
 
 function isIdentPart(ch: string): boolean {
-  return isIdentStart(ch) || isDigit(ch);
+  if (isIdentStart(ch)) return true;
+  if (isDigit(ch)) return true;
+  // Unicode combining marks and non-ASCII decimal digits are also valid
+  // identifier continuation characters per Modelica 3.6.
+  const cp = ch.codePointAt(0)!;
+  return cp > 127 && /[\p{L}\p{N}\p{M}]/u.test(ch);
 }
 
 function isDigit(ch: string): boolean {
@@ -1167,10 +1248,12 @@ parse(): StoredDefinition {
     this.expect(TokenKind.Semicolon);
   }
 
-  // Class definitions
-  const classDefinitions: ClassDefinition[] = [];
+  // Class definitions — each may be optionally preceded by "final"
+  const classDefinitions: StoredClassEntry[] = [];
   while (!this.check(TokenKind.EOF)) {
-    classDefinitions.push(this.parseClassDefinition("public"));
+    const isFinal = this.match(TokenKind.Final);
+    const definition = this.parseClassDefinition(isFinal);
+    classDefinitions.push({ isFinal, definition });
     this.expect(TokenKind.Semicolon);
   }
 
@@ -1198,16 +1281,33 @@ class_definition :=
 The `class_prefixes` are the restriction keyword (`model`, `block`, etc.) plus optional modifiers like `expandable`. The `composition` is the body — elements, equation sections, algorithm sections.
 
 ```typescript
-private parseClassDefinition(visibility: Visibility): ClassDefinition {
+// isFinal is passed in from the call site because "final" is consumed there
+// (at the stored-definition level or the element level) before this method is called.
+private parseClassDefinition(isFinal: boolean): ClassDefinition | ShortClassDefinition {
   const start = this.current.span.start;
 
   const isEncapsulated = this.match(TokenKind.Encapsulated);
   const isPartial = this.match(TokenKind.Partial);
   const isExpandable = this.match(TokenKind.Expandable);
+  // "pure" and "impure" are only semantically valid on function restrictions,
+  // but are collected here for all class definitions and left for semantic validation.
+  const isPure = this.match(TokenKind.Pure);
+  const isImpure = this.match(TokenKind.Impure);
 
   const restriction = this.parseClassRestriction();
   const nameToken = this.expect(TokenKind.Identifier);
   const name = nameToken.value as string;
+
+  // Detect short class definition: class_prefixes IDENT "=" ...
+  // e.g.  type Length = Real(unit = "m");
+  //       type Direction = enumeration(x, y, z);
+  if (this.match(TokenKind.Equals)) {
+    return this.parseShortClassBody(
+      start, restriction, name,
+      { isFinal, isEncapsulated, isPartial, isExpandable, isPure, isImpure }
+    );
+  }
+
   const comment = this.parseOptionalStringComment();
 
   // Parse composition (body)
@@ -1264,9 +1364,12 @@ private parseClassDefinition(visibility: Visibility): ClassDefinition {
     span: this.spanFrom(start),
     restriction,
     name,
+    isFinal,
     isEncapsulated,
     isPartial,
     isExpandable,
+    isPure,
+    isImpure,
     elements,
     equationSections,
     algorithmSections,
@@ -1290,6 +1393,86 @@ private parseClassRestriction(): ClassRestriction {
     return "operator";
   }
   throw this.error("Expected class restriction keyword");
+}
+
+// Parses the body of a short class definition, after the "=" has been consumed.
+// Two forms:
+//   (1) type Length = Real(unit = "m")             — type specialisation
+//   (2) type Direction = enumeration(North, South)  — enumeration type
+private parseShortClassBody(
+  start: SourceLocation,
+  restriction: ClassRestriction,
+  name: string,
+  prefixes: {
+    isFinal: boolean; isEncapsulated: boolean; isPartial: boolean;
+    isExpandable: boolean; isPure: boolean; isImpure: boolean;
+  }
+): ShortClassDefinition {
+  if (this.match(TokenKind.Enumeration)) {
+    // enumeration type
+    this.expect(TokenKind.LParen);
+    const enumLiterals = this.parseEnumerationList();
+    this.expect(TokenKind.RParen);
+    const comment = this.parseOptionalStringComment();
+    const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
+    return {
+      kind: "ShortClassDefinition",
+      span: this.spanFrom(start),
+      ...prefixes,
+      restriction,
+      name,
+      baseType: null,
+      arraySubscripts: [],
+      modification: null,
+      enumeration: enumLiterals,
+      annotation,
+      comment,
+    };
+  }
+
+  // Type specialisation: base type name, optional array subscripts, optional modification
+  const baseType = this.parseComponentReference();
+  const arraySubscripts = this.check(TokenKind.LBracket)
+    ? this.parseArraySubscripts()
+    : [];
+  const modification = this.check(TokenKind.LParen)
+    ? this.parseClassModification()
+    : null;
+  const comment = this.parseOptionalStringComment();
+  const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
+
+  return {
+    kind: "ShortClassDefinition",
+    span: this.spanFrom(start),
+    ...prefixes,
+    restriction,
+    name,
+    baseType,
+    arraySubscripts,
+    modification,
+    enumeration: null,
+    annotation,
+    comment,
+  };
+}
+
+private parseEnumerationList(): EnumerationLiteral[] {
+  const literals: EnumerationLiteral[] = [];
+  if (!this.check(TokenKind.RParen)) {
+    literals.push(this.parseEnumerationLiteral());
+    while (this.match(TokenKind.Comma)) {
+      if (this.check(TokenKind.RParen)) break; // trailing comma
+      literals.push(this.parseEnumerationLiteral());
+    }
+  }
+  return literals;
+}
+
+private parseEnumerationLiteral(): EnumerationLiteral {
+  const nameToken = this.expect(TokenKind.Identifier);
+  const comment = this.parseOptionalStringComment();
+  const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
+  return { name: nameToken.value as string, comment, annotation };
 }
 ```
 
@@ -1345,9 +1528,10 @@ private parseElement(visibility: Visibility): Element {
   const isOuter = this.match(TokenKind.Outer);
   const isReplaceable = this.match(TokenKind.Replaceable);
 
-  // Check if this is a nested class definition
+  // Check if this is a nested class definition.
+  // isFinal collected above is passed in here so the ClassDefinition node records it.
   if (this.isClassRestrictionStart()) {
-    const classDef = this.parseClassDefinition(visibility);
+    const classDef = this.parseClassDefinition(isFinal);
     this.expect(TokenKind.Semicolon);
     return classDef;
   }
@@ -1420,6 +1604,12 @@ private parseComponentDeclaration(
     ? this.parseExpression()
     : null;
 
+  // Optional constrainedby clause — only meaningful on replaceable components,
+  // but parsed unconditionally so the parser does not need to track that context.
+  const constrainedBy = this.match(TokenKind.ConstrainedBy)
+    ? this.parseConstrainedByClause()
+    : null;
+
   // Optional string comment and annotation
   const comment = this.parseOptionalStringComment();
   const annotation = this.check(TokenKind.Annotation)
@@ -1442,9 +1632,24 @@ private parseComponentDeclaration(
     arraySubscripts,
     modification,
     conditionAttribute,
-    constrainedBy: null, // parsed separately if present
+    constrainedBy,
     annotation,
     comment,
+  };
+}
+
+private parseConstrainedByClause(): ConstrainedByClause {
+  const start = this.current.span.start;
+  const typeName = this.parseComponentReference();
+  // Only a class modification '(...)' is allowed here — no '= expr' binding
+  const modification = this.check(TokenKind.LParen)
+    ? this.parseClassModification()
+    : null;
+  return {
+    kind: "ConstrainedByClause",
+    span: this.spanFrom(start),
+    typeName,
+    modification,
   };
 }
 ```
@@ -1592,8 +1797,28 @@ private parseEquation(): EquationNode {
     return this.parseWhenEquation(start);
   }
 
-  // Simple equation: expr = expr
+  // Disambiguate simple equation (lhs = rhs) from function-call equation (name(...)).
+  // Both start with an expression. Parse the left side fully, then inspect the result:
+  //   - If it produced a FunctionCallExpr and the next token is NOT "=", it is a
+  //     function-call equation: transition(...), assert(...), reinit(...), etc.
+  //   - Otherwise, expect "=" and parse the right side as a simple equation.
   const lhs = this.parseExpression();
+
+  if (lhs.kind === "FunctionCallExpr" && !this.check(TokenKind.Equals)) {
+    const comment = this.parseOptionalStringComment();
+    const annotation = this.check(TokenKind.Annotation)
+      ? this.parseAnnotation() : null;
+    return {
+      kind: "FunctionCallEquation",
+      span: this.spanFrom(start),
+      name: lhs.name,
+      args: lhs.args,
+      annotation,
+      comment,
+    };
+  }
+
+  // Simple equation: expr = expr
   this.expect(TokenKind.Equals);
   const rhs = this.parseExpression();
   const comment = this.parseOptionalStringComment();
@@ -1898,12 +2123,22 @@ private parseComponentReference(): ComponentReference {
 private parseArraySubscripts(): Expression[] {
   this.expect(TokenKind.LBracket);
   const subscripts: Expression[] = [];
-  subscripts.push(this.parseExpression());
+  subscripts.push(this.parseSubscript());
   while (this.match(TokenKind.Comma)) {
-    subscripts.push(this.parseExpression());
+    subscripts.push(this.parseSubscript());
   }
   this.expect(TokenKind.RBracket);
   return subscripts;
+}
+
+// A subscript is either a bare ':' (meaning all indices along this dimension)
+// or an expression (possibly a range expression like 1:N or 1:2:N).
+private parseSubscript(): Expression {
+  const start = this.current.span.start;
+  if (this.match(TokenKind.Colon)) {
+    return { kind: "ColonExpr", span: this.spanFrom(start) };
+  }
+  return this.parseExpressionOrRange();
 }
 ```
 
@@ -2018,7 +2253,85 @@ private parseOptionalStringComment(): string | null {
 }
 ```
 
-### 3.11 Utility methods
+### 3.11 Statement parsing
+
+Statements appear inside `algorithm` sections. They follow the same pattern as equation parsing but use `:=` for assignment and include `while` and `break`/`return` forms not available in equation sections.
+
+The main disambiguation challenge is the **tuple assignment** for functions with multiple return values:
+
+```modelica
+(a, b, c) := f(x);   // tuple target
+x := f(y);           // single target
+f(x);                // function-call statement (no assignment)
+```
+
+```typescript
+private parseStatement(): Statement {
+  const start = this.current.span.start;
+
+  // Tuple assignment: (a, b, c) := expr
+  if (this.check(TokenKind.LParen)) {
+    return this.parseTupleAssignment(start);
+  }
+
+  if (this.match(TokenKind.If))     return this.parseIfStatement(start);
+  if (this.match(TokenKind.For))    return this.parseForStatement(start);
+  if (this.match(TokenKind.While))  return this.parseWhileStatement(start);
+  if (this.match(TokenKind.When))   return this.parseWhenStatement(start);
+  if (this.match(TokenKind.Return)) return { kind: "ReturnStatement", span: this.spanFrom(start) };
+  if (this.match(TokenKind.Break))  return { kind: "BreakStatement",  span: this.spanFrom(start) };
+
+  // Either a single-variable assignment or a function-call statement.
+  // Both start with a component reference.
+  const ref = this.parseComponentReference();
+
+  if (this.check(TokenKind.LParen)) {
+    // Function-call statement: name(args)
+    const args = this.parseFunctionArguments();
+    return {
+      kind: "FunctionCallStatement",
+      span: this.spanFrom(start),
+      name: ref,
+      args,
+    };
+  }
+
+  // Single-variable assignment: ref := expr
+  this.expect(TokenKind.Assign);
+  const value = this.parseExpression();
+  return {
+    kind: "AssignmentStatement",
+    span: this.spanFrom(start),
+    target: ref,
+    value,
+  };
+}
+
+private parseTupleAssignment(start: SourceLocation): AssignmentStatement {
+  // Consume the '(' and parse comma-separated component references.
+  this.expect(TokenKind.LParen);
+  const components: ComponentReference[] = [];
+  if (!this.check(TokenKind.RParen)) {
+    components.push(this.parseComponentReference());
+    while (this.match(TokenKind.Comma)) {
+      components.push(this.parseComponentReference());
+    }
+  }
+  this.expect(TokenKind.RParen);
+  this.expect(TokenKind.Assign);  // :=
+  const value = this.parseExpression();
+  return {
+    kind: "AssignmentStatement",
+    span: this.spanFrom(start),
+    target: { components },
+    value,
+  };
+}
+```
+
+The `if`, `for`, `while`, and `when` statement parsers follow the same pattern as their equation counterparts — parse condition-body branches, collect in an array, close with `end if` / `end for` / `end while` / `end when`.
+
+### 3.12 Utility methods
 
 ```typescript
 private spanFrom(start: SourceLocation): Span {

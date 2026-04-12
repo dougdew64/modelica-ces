@@ -1,8 +1,21 @@
-export function add(a: number, b: number): number {
-  return a + b;
-}
+import { parseArgs } from "./infrastructure/cli.ts";
+import { readSourceFile } from "./infrastructure/fileReader.ts";
 
-// Learn more at https://docs.deno.com/runtime/manual/examples/module_metadata#concepts
 if (import.meta.main) {
-  console.log("Add 2 + 4 =", add(2, 4));
+  let filePath: string;
+  try {
+    filePath = parseArgs(Deno.args);
+  } catch (err) {
+    console.error((err as Error).message);
+    Deno.exit(1);
+  }
+
+  try {
+    await readSourceFile(filePath);
+  } catch (err) {
+    const message = (err as Error).message;
+    // Deno surfaces OS errors like "No such file or directory" — pass them through
+    console.error(message);
+    Deno.exit(1);
+  }
 }

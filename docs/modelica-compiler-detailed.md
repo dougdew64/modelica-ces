@@ -8,7 +8,7 @@ A Modelica compiler is not merely a syntactic parser. It transforms hierarchical
 4. Symbolic Preprocessing
 5. Code Generation and Numerical Solving
 
-This document describes each phase in full detail.
+This document describes each phase in full detail. The target language version is **Modelica 3.6**.
 
 ---
 
