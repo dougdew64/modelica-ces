@@ -8,6 +8,7 @@ import { parseArgs } from "../../src/infrastructure/cli.ts";
 import { readSourceFile } from "../../src/infrastructure/fileReader.ts";
 
 const SPRING_MASS_DAMPER_PATH = "tests/models/SpringMassDamper.mo";
+const BAD_SYNTAX_PATH = "tests/models/BadSyntax.mo";
 
 // =============================================================================
 // Command-Line Argument Handling — Unit Tests
@@ -110,4 +111,31 @@ Deno.test("I-FILE-1: valid file is read end-to-end with exit code zero and no er
   const errorText = new TextDecoder().decode(stderr);
   assertEquals(code, 0);
   assertEquals(errorText, "");
+});
+
+// =============================================================================
+// Parser Integration — Integration Tests
+// =============================================================================
+
+Deno.test("I-PARSE-1: syntactically invalid file exits with non-zero code", async () => {
+  const cmd = new Deno.Command(Deno.execPath(), {
+    args: ["run", "--allow-read", "src/main.ts", BAD_SYNTAX_PATH],
+    stdout: "piped",
+    stderr: "piped",
+    cwd: Deno.cwd(),
+  });
+  const { code } = await cmd.output();
+  assertNotEquals(code, 0);
+});
+
+Deno.test("I-PARSE-2: syntactically invalid file prints a file:line:col error message to stderr", async () => {
+  const cmd = new Deno.Command(Deno.execPath(), {
+    args: ["run", "--allow-read", "src/main.ts", BAD_SYNTAX_PATH],
+    stdout: "piped",
+    stderr: "piped",
+    cwd: Deno.cwd(),
+  });
+  const { stderr } = await cmd.output();
+  const errorText = new TextDecoder().decode(stderr);
+  assertMatch(errorText, /BadSyntax\.mo:\d+:\d+:/);
 });

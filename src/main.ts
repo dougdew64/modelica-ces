@@ -1,5 +1,6 @@
 import { parseArgs } from "./infrastructure/cli.ts";
 import { readSourceFile } from "./infrastructure/fileReader.ts";
+import { Parser } from "./phase1/parser.ts";
 
 if (import.meta.main) {
   let filePath: string;
@@ -11,11 +12,11 @@ if (import.meta.main) {
   }
 
   try {
-    await readSourceFile(filePath);
+    const { filePath: fp, source } = await readSourceFile(filePath);
+    const parser = new Parser(source, fp);
+    parser.parse();
   } catch (err) {
-    const message = (err as Error).message;
-    // Deno surfaces OS errors like "No such file or directory" — pass them through
-    console.error(message);
+    console.error((err as Error).message);
     Deno.exit(1);
   }
 }

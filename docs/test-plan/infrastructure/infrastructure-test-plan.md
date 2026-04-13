@@ -53,3 +53,16 @@ These tests target the file-reading logic directly.
 | # | Test | Invocation | Expected Result |
 |---|------|------------|----------------|
 | I-FILE-1 | Valid file is read end-to-end | `deno run src/main.ts tests/models/SpringMassDamper.mo` | Program completes with exit code zero; no file-read errors reported |
+
+---
+
+## Parser Integration
+
+Once the source file is read, `main.ts` constructs a `Parser` and calls `parse()`. Any error thrown by the lexer or parser propagates as an `Error` with a message of the form `file:line:col: message`. The top-level `try/catch` in `main.ts` prints the message to stderr and exits with code 1.
+
+### Integration Tests
+
+| # | Test | Invocation | Expected Exit Code | Expected Output |
+|---|------|------------|--------------------|-----------------|
+| I-PARSE-1 | Syntactically invalid file exits with non-zero code | `deno run src/main.ts tests/models/BadSyntax.mo` | Non-zero | — |
+| I-PARSE-2 | Syntactically invalid file prints `file:line:col:` error to stderr | `deno run src/main.ts tests/models/BadSyntax.mo` | — | stderr matches `BadSyntax.mo:\d+:\d+:` |
