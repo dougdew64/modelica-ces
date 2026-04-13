@@ -15,7 +15,7 @@ Scope:
 The compiler entry point must accept a single command-line argument: the path to a Modelica source file (conventionally with a `.mo` extension). For example:
 
 ```
-deno run main.ts tests/SpringMassDamper.mo
+deno run main.ts tests/models/SpringMassDamper.mo
 ```
 
 The argument is a file path, not file contents. The entry point is responsible for validating that an argument was provided and that it refers to a file that exists and is readable before any compiler phase is invoked. If no argument is provided, or the path is invalid, the program should print a clear error message and exit with a non-zero status code.

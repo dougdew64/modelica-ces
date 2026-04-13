@@ -7,7 +7,7 @@ import {
 import { parseArgs } from "../../src/infrastructure/cli.ts";
 import { readSourceFile } from "../../src/infrastructure/fileReader.ts";
 
-const SPRING_MASS_DAMPER_PATH = "tests/SpringMassDamper.mo";
+const SPRING_MASS_DAMPER_PATH = "tests/models/SpringMassDamper.mo";
 
 // =============================================================================
 // Command-Line Argument Handling — Unit Tests

@@ -27,7 +27,7 @@
       "id": "moFilePath",
       "type": "promptString",
       "description": "Path to the .mo file",
-      "default": "tests/SpringMassDamper.mo"
+      "default": "tests/models/SpringMassDamper.mo"
     }
   ]
 }
