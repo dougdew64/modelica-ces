@@ -9,6 +9,7 @@ import type {
   ClassModification,
   ComponentDeclaration,
   ConnectEquation,
+  DerClassDefinition,
   ElementModification,
   ExtendsClause,
   FunctionCallExpr,
@@ -28,7 +29,9 @@ function parse(source: string, file = "test.mo"): StoredDefinition {
   return new Parser(source, file).parse();
 }
 
-function parseClass(source: string): ClassDefinition | ShortClassDefinition {
+function parseClass(
+  source: string,
+): ClassDefinition | ShortClassDefinition | DerClassDefinition {
   return parse(source).classDefinitions[0].definition;
 }
 
@@ -228,9 +231,11 @@ Deno.test("U-PAR-22: flow and stream prefixes", () => {
   );
 });
 
-Deno.test("U-PAR-23: Array subscripts in component declaration", () => {
+Deno.test("U-PAR-23: Type-level array subscripts in component declaration", () => {
+  // Per spec (post-update): [N] after the type goes into typeArraySubscripts.
   const cd = firstElement("model M Real[3] v; end M;") as ComponentDeclaration;
-  assertEquals(cd.arraySubscripts.length, 1);
+  assertEquals(cd.typeArraySubscripts.length, 1);
+  assertEquals(cd.nameArraySubscripts.length, 0);
 });
 
 Deno.test("U-PAR-24: Component with class modification (start value)", () => {
@@ -238,7 +243,11 @@ Deno.test("U-PAR-24: Component with class modification (start value)", () => {
   const classMod = cd.modification!.classModification!;
   assertEquals(classMod.kind, "ClassModification");
   assertEquals(classMod.arguments.length, 1);
-  assertEquals(classMod.arguments[0].name.parts[0].name, "start");
+  // After the spec update, arguments is a union including ElementReplaceable
+  // and ElementRedeclaration. Narrow via the kind discriminant.
+  const arg = classMod.arguments[0] as ElementModification;
+  assertEquals(arg.kind, "ElementModification");
+  assertEquals(arg.name.parts[0].name, "start");
 });
 
 // =============================================================================
@@ -274,24 +283,32 @@ Deno.test("U-PAR-28: import clause — alias", () => {
 // 6. Modifications
 // =============================================================================
 
-Deno.test("U-PAR-29: Binding expression modification", () => {
+Deno.test("U-PAR-29: Binding expression modification (equals form)", () => {
   const cd = firstElement("model M Real x = 1.0; end M;") as ComponentDeclaration;
-  assertEquals(cd.modification!.bindingExpression!.kind, "RealLiteral");
+  const binding = cd.modification!.binding!;
+  assertEquals(binding.kind, "equals");
+  // value is Expression | "break"; in this case a RealLiteral expression.
+  assert(typeof binding.value === "object");
+  // deno-lint-ignore no-explicit-any
+  assertEquals((binding.value as any).kind, "RealLiteral");
 });
 
 Deno.test("U-PAR-30: Nested modification (three levels deep)", () => {
   const cd = firstElement("model M R1 r(p(v(start = 0))); end M;") as ComponentDeclaration;
   const level1 = cd.modification!.classModification!;
-  const level2 = level1.arguments[0].modification!.classModification!;
-  const level3 = level2.arguments[0].modification!.classModification!;
-  assertEquals(level3.arguments[0].name.parts[0].name, "start");
+  const arg1 = level1.arguments[0] as ElementModification;
+  const level2 = arg1.modification!.classModification!;
+  const arg2 = level2.arguments[0] as ElementModification;
+  const level3 = arg2.modification!.classModification!;
+  const arg3 = level3.arguments[0] as ElementModification;
+  assertEquals(arg3.name.parts[0].name, "start");
 });
 
 Deno.test("U-PAR-31: each and final in element modification", () => {
   const cd = firstElement(
     "model M R1[3] r(each final x = 0); end M;",
   ) as ComponentDeclaration;
-  const em = cd.modification!.classModification!.arguments[0];
+  const em = cd.modification!.classModification!.arguments[0] as ElementModification;
   assertEquals(em.isEach, true);
   assertEquals(em.isFinal, true);
 });
@@ -470,12 +487,12 @@ Deno.test("U-PAR-54: Multiplication binds tighter than addition", () => {
   assertEquals((e.right as BinaryExpr).op, "*");
 });
 
-Deno.test("U-PAR-55: ^ is right-associative", () => {
-  // 2 ^ 3 ^ 4  →  BinaryExpr(^, 2, BinaryExpr(^, 3, 4))
-  const e = parseExpr("2 ^ 3 ^ 4") as BinaryExpr;
+Deno.test("U-PAR-55: ^ is non-associative — a ^ b is accepted but a ^ b ^ c is rejected", () => {
+  // Per Modelica 3.6 spec: `factor := primary [ ("^" | ".^") primary ]`.
+  // Only one optional `^` per factor, so `a ^ b ^ c` must be a parse error.
+  const e = parseExpr("2 ^ 3") as BinaryExpr;
   assertEquals(e.op, "^");
-  assertEquals(e.right.kind, "BinaryExpr");
-  assertEquals((e.right as BinaryExpr).op, "^");
+  assertThrows(() => parseExpr("2 ^ 3 ^ 4"), Error);
 });
 
 Deno.test("U-PAR-56: Component reference expression", () => {
@@ -599,6 +616,239 @@ Deno.test("U-PAR-70: Error message includes file:line:col prefix", () => {
 // =============================================================================
 // 12. End-to-end
 // =============================================================================
+
+// =============================================================================
+// 13. Tests added by the 2026-04-13 spec-conformance update
+//
+// These cover the seventeen items in the parser design doc's update summary:
+// power non-associativity, unary precedence, multi-component declarations,
+// type-level array subscripts, long class with extends, der-class-specifier,
+// initial/pure as primaries, tuple assignment rules, modification grammar
+// (replaceable, redeclare, description strings, break, :=), short class
+// base-prefix, description-string concatenation, array comprehensions,
+// and function partial application.
+// =============================================================================
+
+Deno.test("U-PAR-72: unary minus operand absorbs * — -a*b → Neg(Mul(a, b))", () => {
+  // Per the updated Pratt table, unary +/- parses its operand at BP.Multiplication,
+  // so the multiplication is absorbed inside the unary.
+  const e = parseExpr("-a*b") as UnaryExpr;
+  assertEquals(e.kind, "UnaryExpr");
+  assertEquals(e.op, "-");
+  // deno-lint-ignore no-explicit-any
+  const operand = e.operand as any;
+  assertEquals(operand.kind, "BinaryExpr");
+  assertEquals(operand.op, "*");
+});
+
+Deno.test("U-PAR-73: multi-component declaration collects all components", () => {
+  // `Real x, y, z;` produces three ComponentDeclaration elements sharing the type.
+  const def = parseClass("model M Real x, y, z; end M;") as ClassDefinition;
+  assertEquals(def.elements.length, 3);
+  const names = def.elements.map((e) => (e as ComponentDeclaration).name);
+  assertEquals(names, ["x", "y", "z"]);
+  // Each declaration records the same shared type
+  for (const el of def.elements) {
+    assertEquals((el as ComponentDeclaration).typeName.parts[0].name, "Real");
+  }
+});
+
+Deno.test("U-PAR-74: multi-component declaration with per-name modifications", () => {
+  const def = parseClass(
+    "model M parameter Real a = 1, b[3] = {1,2,3}; end M;",
+  ) as ClassDefinition;
+  assertEquals(def.elements.length, 2);
+  const a = def.elements[0] as ComponentDeclaration;
+  const b = def.elements[1] as ComponentDeclaration;
+  assertEquals(a.name, "a");
+  assertEquals(a.variability, "parameter");
+  assertEquals(b.name, "b");
+  assertEquals(b.variability, "parameter");
+  // Each has its own binding
+  assert(a.modification !== null);
+  assert(b.modification !== null);
+  // b has a name-level array subscript
+  assertEquals(b.nameArraySubscripts.length, 1);
+});
+
+Deno.test("U-PAR-75: type- and name-level array subscripts compose", () => {
+  // Real[2] m[3] — 3-element array of Real[2] (a 3x2 matrix)
+  const cd = firstElement("model M Real[2] m[3]; end M;") as ComponentDeclaration;
+  assertEquals(cd.typeArraySubscripts.length, 1);
+  assertEquals(cd.nameArraySubscripts.length, 1);
+});
+
+Deno.test("U-PAR-76: long class definition with extends form", () => {
+  // model X extends Y(p = 1); ... end X;
+  const def = parseClass(
+    "model X extends Y(p = 1); Real x; end X;",
+  ) as ClassDefinition;
+  assertEquals(def.kind, "ClassDefinition");
+  assertEquals(def.name, "X");
+  assert(def.extending !== null);
+  assertEquals(def.extending!.name.parts[0].name, "Y");
+  assert(def.extending!.modification !== null);
+  assertEquals(def.extending!.modification!.arguments.length, 1);
+});
+
+Deno.test("U-PAR-77: der-class-specifier produces a DerClassDefinition", () => {
+  // function df = der(f, x);
+  const sd = parse("function df = der(f, x);");
+  assertEquals(sd.classDefinitions.length, 1);
+  const def = sd.classDefinitions[0].definition as DerClassDefinition;
+  assertEquals(def.kind, "DerClassDefinition");
+  assertEquals(def.name, "df");
+  assertEquals(def.baseFunction.parts[0].name, "f");
+  assertEquals(def.withRespectTo, ["x"]);
+});
+
+Deno.test("U-PAR-78: der-class-specifier with multiple with-respect-to variables", () => {
+  const sd = parse("function df = der(g, x, y);");
+  const def = sd.classDefinitions[0].definition as DerClassDefinition;
+  assertEquals(def.kind, "DerClassDefinition");
+  assertEquals(def.withRespectTo, ["x", "y"]);
+});
+
+Deno.test("U-PAR-79: initial() is a primary function-call expression", () => {
+  const e = parseExpr("initial()") as FunctionCallExpr;
+  assertEquals(e.kind, "FunctionCallExpr");
+  assertEquals(e.name.parts[0].name, "initial");
+});
+
+Deno.test("U-PAR-80: pure(f(x)) is a primary function-call expression", () => {
+  const e = parseExpr("pure(f(x))") as FunctionCallExpr;
+  assertEquals(e.kind, "FunctionCallExpr");
+  assertEquals(e.name.parts[0].name, "pure");
+  assertEquals(e.args.positional.length, 1);
+});
+
+Deno.test("U-PAR-81: tuple assignment with empty positions", () => {
+  // (a, , c) := f(x);  — the middle slot is skipped (null)
+  const def = parseClass(
+    "model M algorithm (a, , c) := f(x); end M;",
+  ) as ClassDefinition;
+  const stmt = def.algorithmSections[0].statements[0] as AssignmentStatement;
+  // deno-lint-ignore no-explicit-any
+  const target = stmt.target as any;
+  assertEquals(target.components.length, 3);
+  assert(target.components[0] !== null);
+  assertEquals(target.components[1], null);
+  assert(target.components[2] !== null);
+});
+
+Deno.test("U-PAR-82: tuple assignment RHS must be a function call", () => {
+  // (a, b) := x + 1;  — RHS is not a function call, must be rejected
+  assertThrows(
+    () =>
+      parse("model M algorithm (a, b) := x + 1; end M;"),
+    Error,
+  );
+});
+
+Deno.test("U-PAR-83: replaceable argument inside class modification", () => {
+  // (redeclare X = Y)  — element-redeclaration inside class modification
+  const cd = firstElement(
+    "model M R1 r(redeclare Y x); end M;",
+  ) as ComponentDeclaration;
+  const arg = cd.modification!.classModification!.arguments[0];
+  assertEquals(arg.kind, "ElementRedeclaration");
+});
+
+Deno.test("U-PAR-84: element modification carries a description string", () => {
+  // (p = 1 "documentation")  — element-modification with trailing description string
+  const cd = firstElement(
+    'model M R1 r(p = 1 "documentation"); end M;',
+  ) as ComponentDeclaration;
+  const arg = cd.modification!.classModification!.arguments[0] as ElementModification;
+  assertEquals(arg.descriptionString, "documentation");
+});
+
+Deno.test("U-PAR-85: modification expression may be `break`", () => {
+  // (p = break)
+  const cd = firstElement(
+    "model M R1 r(p = break); end M;",
+  ) as ComponentDeclaration;
+  const arg = cd.modification!.classModification!.arguments[0] as ElementModification;
+  const binding = arg.modification!.binding!;
+  assertEquals(binding.kind, "equals");
+  assertEquals(binding.value, "break");
+});
+
+Deno.test("U-PAR-86: short class specifier with input base-prefix", () => {
+  // type T = input Real;
+  const def = parseClass("type T = input Real;") as ShortClassDefinition;
+  assertEquals(def.kind, "ShortClassDefinition");
+  assertEquals(def.basePrefix.isInput, true);
+  assertEquals(def.basePrefix.isOutput, false);
+  assertEquals(def.baseType!.parts[0].name, "Real");
+});
+
+Deno.test("U-PAR-87: open enumeration — enumeration(:) sets isOpen", () => {
+  // type E = enumeration(:);
+  const def = parseClass("type E = enumeration(:);") as ShortClassDefinition;
+  assertEquals(def.kind, "ShortClassDefinition");
+  assertEquals(def.isOpen, true);
+  assertEquals(def.enumeration, null);
+});
+
+Deno.test("U-PAR-88: modification with := (assign) form", () => {
+  // (p := 1)
+  const cd = firstElement(
+    "model M R1 r(p := 1); end M;",
+  ) as ComponentDeclaration;
+  const arg = cd.modification!.classModification!.arguments[0] as ElementModification;
+  const binding = arg.modification!.binding!;
+  assertEquals(binding.kind, "assign");
+});
+
+Deno.test("U-PAR-89: description string concatenation with +", () => {
+  // The description string on a component declaration is "a" + "b", one string.
+  const cd = firstElement(
+    'model M Real x "line one " + "line two"; end M;',
+  ) as ComponentDeclaration;
+  assertEquals(cd.comment, "line one line two");
+});
+
+Deno.test("U-PAR-90: array constructor with for-comprehension", () => {
+  // {i*2 for i in 1:N}
+  // deno-lint-ignore no-explicit-any
+  const e = parseExpr("{i*2 for i in 1:N}") as any;
+  assertEquals(e.kind, "ArrayConstructExpr");
+  assert(e.forIterators !== null);
+  assertEquals(e.forIterators.length, 1);
+  assertEquals(e.forIterators[0].name, "i");
+  assertEquals(e.elements.length, 1);
+});
+
+Deno.test("U-PAR-91: function partial application — function g(x = 1) as an argument", () => {
+  // f(function g(x = 1))
+  const e = parseExpr("f(function g(x = 1))") as FunctionCallExpr;
+  assertEquals(e.kind, "FunctionCallExpr");
+  assertEquals(e.args.positional.length, 1);
+  // deno-lint-ignore no-explicit-any
+  const arg0 = e.args.positional[0] as any;
+  assertEquals(arg0.kind, "FunctionPartialApplicationExpr");
+  assertEquals(arg0.functionName.parts[0].name, "g");
+  assertEquals(arg0.namedArguments.length, 1);
+  assertEquals(arg0.namedArguments[0].name, "x");
+});
+
+Deno.test("U-PAR-92: constraining clause on a replaceable class definition", () => {
+  // replaceable model X = Y constrainedby Z;
+  const el = firstElement(
+    "model M replaceable model X = Y constrainedby Z; end M;",
+  );
+  assertEquals(el.kind, "ShortClassDefinition");
+  // deno-lint-ignore no-explicit-any
+  assert((el as any).constrainedBy !== null);
+  // deno-lint-ignore no-explicit-any
+  assertEquals((el as any).constrainedBy.typeName.parts[0].name, "Z");
+});
+
+Deno.test("U-PAR-93: positional function argument after named argument is rejected", () => {
+  // f(x = 1, 2)  — positional after named is invalid per spec
+  assertThrows(() => parseExpr("f(x = 1, 2)"), Error);
+});
 
 Deno.test("U-PAR-71: SpringMassDamper.mo parses to the expected structure", async () => {
   const source = await Deno.readTextFile("tests/models/SpringMassDamper.mo");

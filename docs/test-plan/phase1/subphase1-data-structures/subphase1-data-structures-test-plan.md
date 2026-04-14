@@ -118,3 +118,27 @@ AST interfaces are compile-time constructs. These tests verify that the `kind` d
 | U-AST-18 | `UnaryExpr` discriminant | Constructed `UnaryExpr` | `"UnaryExpr"` |
 | U-AST-19 | `FunctionCallExpr` discriminant | Constructed `FunctionCallExpr` | `"FunctionCallExpr"` |
 | U-AST-20 | `ExternalDeclaration` discriminant | Constructed `ExternalDeclaration` | `"ExternalDeclaration"` |
+
+### Updates from 2026-04-13 spec-conformance pass
+
+The spec-conformance update revised several existing AST nodes and added new ones. The construction expressions in tests U-AST-2, U-AST-3, U-AST-4, U-AST-8, and U-AST-10 were updated to match. New tests exercise the new node types.
+
+Changed-field summary for existing U-AST tests:
+
+- **U-AST-2 (`ClassDefinition`)** — now includes `extending: null` and `constrainedBy: null` fields.
+- **U-AST-3 (`ShortClassDefinition`)** — now includes `basePrefix: { isInput: false, isOutput: false }`, `isOpen: false`, and `constrainedBy: null` fields.
+- **U-AST-4 (`ComponentDeclaration`)** — `arraySubscripts` was renamed to `nameArraySubscripts`; a new `typeArraySubscripts: []` field was added.
+- **U-AST-8 (`Modification`)** — `bindingExpression: null` was replaced with `binding: null` (structured binding with `kind: "equals" | "assign"` and `value: Expression | "break"`).
+- **U-AST-10 (`ElementModification`)** — now includes `descriptionString: null`.
+
+New tests for new AST node types:
+
+| # | Test | Node under test | Expected `kind` value |
+|---|------|-----------------|-----------------------|
+| U-AST-21 | `DerClassDefinition` discriminant | Constructed `DerClassDefinition` | `"DerClassDefinition"` |
+| U-AST-22 | `ElementReplaceable` discriminant | Constructed `ElementReplaceable` | `"ElementReplaceable"` |
+| U-AST-23 | `ElementRedeclaration` discriminant | Constructed `ElementRedeclaration` | `"ElementRedeclaration"` |
+| U-AST-24 | `ComponentClause1` discriminant | Constructed `ComponentClause1` | `"ComponentClause1"` |
+| U-AST-25 | `FunctionPartialApplicationExpr` discriminant | Constructed `FunctionPartialApplicationExpr` | `"FunctionPartialApplicationExpr"` |
+
+**Note on token/keyword counts:** `TokenKind` still has exactly 93 members and `KEYWORDS` still has exactly 59 entries (U-TK-8, U-KW-2). The spec-conformance pass confirmed that no new tokens or keywords are required — every keyword the updated parser dispatches on (`initial`, `pure`, `break`, `function`, `replaceable`, `redeclare`, `der`, `extends`, `enumeration`, `input`, `output`) was already in the table.

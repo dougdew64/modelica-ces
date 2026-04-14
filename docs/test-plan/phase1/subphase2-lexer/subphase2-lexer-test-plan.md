@@ -69,8 +69,10 @@ The `Lexer` class must be exported from `src/phase1/lexer.ts` and be constructib
 |---|------|-------|----------------|
 | U-LEX-10 | A `/* ... */` block comment is skipped | `"/* block comment */"` | No non-EOF tokens |
 | U-LEX-11 | Tokens before and after a block comment are returned | `"x /* skip this */ y"` | Kinds: `Identifier`, `Identifier` |
-| U-LEX-12 | Nested block comments `/* /* */ */` are handled correctly | `"x /* outer /* inner */ outer */ y"` | Kinds: `Identifier`, `Identifier` |
+| U-LEX-12 | Block comments do **not** nest — inner `/*` is comment text | `"/* foo /* bar */"` | One comment; no non-EOF tokens |
 | U-LEX-13 | An unterminated block comment throws | `"/* no close"` | `Error` thrown |
+
+Per the Modelica 3.6 spec, delimited comments do not nest: the first `*/` after a `/*` ends the comment. This matches C, C++, and Java behavior and differs from the earlier design, which supported nesting. The non-nesting boundary case is tested in §19 below.
 
 ---
 
@@ -223,3 +225,24 @@ Every token carries a `span` with `start` and `end` `SourceLocation` values. Eac
 |---|------|-------|----------------|
 | U-LEX-63 | An unexpected character throws | `"@"` | `Error` thrown |
 | U-LEX-64 | Error message includes `file:line:col:` prefix | `new Lexer("@", "test.mo")` | Error message starts with `"test.mo:1:1:"` |
+
+---
+
+## 19. Block Comment Non-Nesting Boundary Case
+
+Added by the 2026-04-13 spec-conformance pass. Because `/* */` does not nest, the sequence `/* foo /* bar */ baz */` is **a single comment** followed by the tokens `baz`, `*`, `/` — not one nested comment.
+
+| # | Test | Input | Expected Result |
+|---|------|-------|----------------|
+| U-LEX-65 | `/* foo /* bar */ baz */` — comment ends at first `*/`, then normal tokens | `"/* foo /* bar */ baz */"` | Kinds: `Identifier`, `Star`, `Slash` |
+
+---
+
+## 20. Identifiers Are ASCII-Only
+
+Added by the 2026-04-13 spec-conformance pass. The spec restricts the IDENT alphabet to `a-z`, `A-Z`, `_`, and `0-9` (the last only in non-first positions). Non-ASCII characters are rejected inside unquoted identifiers, even though string literals remain full Unicode.
+
+| # | Test | Input | Expected Result |
+|---|------|-------|----------------|
+| U-LEX-66 | Non-ASCII character in an identifier throws | `"café"` | `Error` thrown |
+| U-LEX-67 | String literals still accept non-ASCII characters | `"\"naïve\""` | `kind === StringLiteral`, `value === "naïve"` |

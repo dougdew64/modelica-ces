@@ -8,6 +8,65 @@ The implementation is split into three parts that are built in order, since each
 2. **Lexer** — converts source text to tokens
 3. **Parser** — converts tokens to AST
 
+## Reference Documents
+
+The authoritative source for the Modelica language is the Modelica Language Specification, published by the Modelica Association:
+
+- [Modelica® Language Specification version 3.6](https://specification.modelica.org/maint/3.6/MLS.html) — the full specification (released 2023-03-09)
+- [Appendix A: Modelica Concrete Syntax](https://specification.modelica.org/maint/3.6/modelica-concrete-syntax.html) — the formal grammar (lexical conventions in A.1, grammar in A.2)
+- [Lexical Structure](https://specification.modelica.org/maint/3.6/lexical-structure.html) — comments, identifiers, reserved keywords, character set rules
+
+When in doubt about a syntactic construct, the grammar appendix is the authoritative source. The grammar snippets quoted in this document are simplified for explanatory purposes; they are not always one-to-one with the spec.
+
+---
+
+## Spec Conformance Update — 2026-04-13
+
+This document was originally written before the design was verified against the Modelica 3.6 specification. A conformance verification pass on **2026-04-13** identified divergences in all three parts (data structures, lexer, parser). The subphase documents are the **authoritative spec-compliant references** for their respective parts:
+
+- **[phase1-subphase1-data-structures.md](subphase1-data-structures/phase1-subphase1-data-structures.md)** — adds 8 modified node types, 5 new node types, and 3 union widenings. Use this as the source of truth when updating `src/phase1/data-structures.ts`.
+- **[phase1-subphase2-lexer.md](subphase2-lexer/phase1-subphase2-lexer.md)** — fixes 2 real bugs (block-comment nesting, Unicode identifiers) and notes 1 acceptable looseness (Q-CHAR set).
+- **[phase1-subphase3-parser.md](subphase3-parser/phase1-subphase3-parser.md)** — fixes 17 spec-conformance items spanning class definitions, modifications, equations, statements, expression precedence, and function arguments.
+
+Each change in those documents is marked with a `[SPEC UPDATE]` callout giving a Was/Now/Spec rule/Action breakdown. Search any subphase doc for the literal string `[SPEC UPDATE]` to find every change.
+
+This parent document has been updated **in place** to be compliant with the spec — the high-impact prose and code-block errors have been corrected directly. Where a change is too structural to fix in place without large duplication, an inline `[SPEC UPDATE — see subphase doc]` callout points to the subphase doc that contains the authoritative spec-compliant version. The two layers are intended to be coherent: when the parent and a subphase doc disagree, **the subphase doc wins**.
+
+### Conformance change index (consolidated across all three subphases)
+
+**Lexer (2 bugs fixed inline + 1 acceptable looseness):**
+1. Block comments do not nest (was: nested with depth counter)
+2. Identifiers are ASCII-only (was: Unicode letters allowed)
+3. Quoted-identifier Q-CHAR set is restricted (acceptable looseness — kept permissive)
+
+**Parser (17 conformance items):**
+1. Power operator is non-associative (was: right-associative)
+2. Unary `+`/`-` at addition level (was: between `*` and `^`)
+3. Multi-component declarations (`Real x, y, z;`)
+4. Type-level array subscripts (`Real[3] x;`)
+5. Long class specifier `extends` form (`model X extends Y(p=1) ... end X;`)
+6. `der`-class-specifier (`function f = der(g, x)`)
+7. `initial` and `pure` as primary function-call prefixes
+8. Tuple assignment RHS must be a function call
+9. Class modification arguments: element-replaceable / element-redeclaration
+10. Element modifications carry a description-string
+11. Modification expression can be `break`
+12. Short class specifier `base-prefix` (input/output)
+13. `:=` form in modifications
+14. Description-string `+` concatenation
+15. Output-expression-list empty positions (`(a, , c) := f(x)`)
+16. Array constructors with `for`-comprehensions (`{i*2 for i in 1:N}`)
+17. `function`-partial-application
+
+**Data structures (16 changes derived from the above):**
+- 8 modified types: `ClassDefinition`, `ShortClassDefinition`, `ComponentDeclaration`, `Modification`, `ElementModification`, `ClassModification`, `ArrayConstructExpr`, `TupleTarget`
+- 5 new types: `DerClassDefinition`, `ElementReplaceable`, `ElementRedeclaration`, `ComponentClause1`, `FunctionPartialApplicationExpr`
+- 3 union updates: `StoredClassEntry.definition`, `Element`, `Expression`
+
+When `src/phase1/data-structures.ts`, the lexer implementation, the parser implementation, and the corresponding test plans and tests are revised, the **subphase documents** should be the working reference. This parent document is kept up-to-date as a consistency check, not as a duplicate spec.
+
+---
+
 ---
 
 ## Part 1: Data Structures
@@ -258,6 +317,22 @@ interface StoredClassEntry {
 
 #### Class definitions
 
+> **\[SPEC UPDATE 2026-04-13 — see subphase doc]** — *`ClassDefinition`, `ShortClassDefinition`, and new `DerClassDefinition` (data-structures items 1, 2; new type 1)*
+>
+> The `ClassDefinition` interface below is the original baseline. The spec-conformant version adds:
+> - `extending: { name: ComponentReference; modification: ClassModification | null } | null` — for the `class X extends Y(...) ... end X;` form (parser item 5)
+> - `constrainedBy: ConstrainedByClause | null` — for `replaceable` nested classes (parser item 10)
+>
+> `ShortClassDefinition` adds:
+> - `basePrefix: { isInput: boolean; isOutput: boolean }` — the base-prefix on short class specifiers (parser item 12)
+> - `isOpen: boolean` — for `enumeration(:)`
+>
+> A new top-level form `DerClassDefinition` is added for the `class-specifier := der-class-specifier` rule (parser item 6).
+>
+> The `StoredClassEntry.definition` and `Element` unions both widen to include `DerClassDefinition`.
+>
+> See [phase1-subphase1-data-structures.md §1.1, §1.2, §2.1, §3](subphase1-data-structures/phase1-subphase1-data-structures.md) for the complete updated interface definitions.
+
 All class-like constructs (`model`, `block`, `connector`, `record`, `package`, `function`, `type`, `class`, `operator`) share a single AST node type. The `restriction` field records which keyword was used. Semantic validation (e.g., "connectors cannot have equation sections") happens in a later phase, not during parsing.
 
 ```typescript
@@ -324,6 +399,18 @@ interface EnumerationLiteral {
 A single `ClassDefinition` node holds all elements (declarations, extends clauses, import clauses), all equation sections, and all algorithm sections. In Modelica, a class body can have multiple alternating `public`/`protected` sections and multiple `equation`/`algorithm` sections. The elements and sections are stored in the order they appear, with visibility tracked on each element.
 
 #### Elements
+
+> **\[SPEC UPDATE 2026-04-13 — see subphase doc]** — *`ComponentDeclaration` and `Element` union (data-structures items 3, union 2)*
+>
+> The `ComponentDeclaration` interface below is the original baseline. The spec-conformant version adds:
+> - `typeArraySubscripts: Expression[]` — for `Real[3] x;` form (parser item 4)
+> - `nameArraySubscripts: Expression[]` — renamed from the original `arraySubscripts` to make the distinction explicit (parser item 4)
+>
+> A single source-level `component-clause` like `parameter Real a = 1, b[3] = {1,2,3};` produces **multiple** `ComponentDeclaration` nodes that share `typeName`, `typeArraySubscripts`, and prefixes (parser item 3). The parsing logic must collect them into a list.
+>
+> The `Element` union widens to also include `ShortClassDefinition` and the new `DerClassDefinition`.
+>
+> See [phase1-subphase1-data-structures.md §1.3, §3.2](subphase1-data-structures/phase1-subphase1-data-structures.md) for the complete updated definitions.
 
 An element is anything that appears in the declaration part of a class body — component declarations, extends clauses, import clauses, and nested class definitions.
 
@@ -394,6 +481,17 @@ interface ConstrainedByClause {
 ```
 
 #### Modifications
+
+> **\[SPEC UPDATE 2026-04-13 — see subphase doc]** — *`Modification`, `ClassModification`, `ElementModification`, plus new `ElementReplaceable`, `ElementRedeclaration`, `ComponentClause1` (data-structures items 4, 5, 6; new types 2, 3, 4)*
+>
+> The interfaces below are the original baselines. The spec-conformant versions add:
+> - `Modification`: replace `bindingExpression: Expression | null` with `binding: { kind: "equals" | "assign"; value: Expression | "break" } | null` — supports the `:=` form (parser item 13) and `break` (parser item 11).
+> - `ElementModification`: add `descriptionString: string | null` (parser item 10).
+> - `ClassModification.arguments`: widen to `(ElementModification | ElementReplaceable | ElementRedeclaration)[]` (parser item 9).
+>
+> New types: `ElementReplaceable`, `ElementRedeclaration`, `ComponentClause1` for the redeclaration/replaceable forms inside class modifications.
+>
+> See [phase1-subphase1-data-structures.md §1.4, §1.5, §1.6, §2.2, §2.3, §2.4](subphase1-data-structures/phase1-subphase1-data-structures.md) for the complete updated definitions.
 
 Modifications are the most structurally recursive part of Modelica syntax. A modification can appear on a component declaration, on an extends clause, inside another modification, or as an annotation. The grammar allows arbitrary nesting.
 
@@ -606,6 +704,15 @@ interface BreakStatement {
 ```
 
 #### Expressions
+
+> **\[SPEC UPDATE 2026-04-13 — see subphase doc]** — *`Expression` union, `ArrayConstructExpr`, `TupleTarget`, new `FunctionPartialApplicationExpr` (data-structures items 7, 8; new type 5; union 3)*
+>
+> The `Expression` union below is the original baseline. The spec-conformant version adds:
+> - `ArrayConstructExpr` gains `forIterators: ForIterator[] | null` for array comprehensions like `{i*2 for i in 1:N}` (parser item 16).
+> - `TupleTarget.components` widens to `(ComponentReference | null)[]` to allow empty positions in tuple-assignment targets like `(a, , c) := f(x)` (parser item 15).
+> - A new node `FunctionPartialApplicationExpr` is added to the `Expression` union for the `function f(x = 1)` form passed as a function argument (parser item 17).
+>
+> See [phase1-subphase1-data-structures.md §1.7, §1.8, §2.5, §3.3](subphase1-data-structures/phase1-subphase1-data-structures.md) for the complete updated definitions.
 
 Expressions are the most diverse AST node family. They must represent arithmetic, comparisons, logical operations, function calls, array construction, if-expressions, and component references.
 
@@ -894,7 +1001,7 @@ private skipWhitespaceAndComments(): void {
       continue;
     }
 
-    // Block comment (nested)
+    // Block comment (non-nesting per spec)
     if (ch === "/" && this.peekNext() === "*") {
       this.advance(); // consume /
       this.advance(); // consume *
@@ -907,27 +1014,22 @@ private skipWhitespaceAndComments(): void {
 }
 
 private scanBlockComment(): void {
-  let depth = 1;
-  while (!this.isAtEnd() && depth > 0) {
-    if (this.peek() === "/" && this.peekNext() === "*") {
-      this.advance();
-      this.advance();
-      depth++;
-    } else if (this.peek() === "*" && this.peekNext() === "/") {
-      this.advance();
-      this.advance();
-      depth--;
-    } else {
-      this.advance();
+  // The opening "/*" has already been consumed by the caller.
+  while (!this.isAtEnd()) {
+    if (this.peek() === "*" && this.peekNext() === "/") {
+      this.advance(); // consume *
+      this.advance(); // consume /
+      return;
     }
+    this.advance();
   }
-  if (depth > 0) {
-    throw this.error("Unterminated block comment");
-  }
+  throw this.error("Unterminated block comment");
 }
 ```
 
-The nesting depth counter is the key detail — Modelica block comments nest, unlike C/Java. The lexer increments on `/*` and decrements on `*/`, only ending when depth returns to zero.
+> **\[SPEC UPDATE 2026-04-13]** — *Block comments do not nest (lexer item 1)*
+>
+> An earlier version of this section claimed that Modelica supports nested block comments and used a depth counter. This was incorrect. The Modelica 3.6 spec explicitly states: *"Delimited Modelica comments do not nest, i.e., `/* */` cannot be embedded within `/* … */`."* The non-nesting `scanBlockComment` above matches the spec — it scans forward to the first `*/`. See [phase1-subphase2-lexer.md §3.1](subphase2-lexer/phase1-subphase2-lexer.md) for the full callout and test-impact list.
 
 ### 2.4 Numbers
 
@@ -1018,25 +1120,21 @@ function isIdentStart(ch: string): boolean {
   if (ch >= "a" && ch <= "z") return true;
   if (ch >= "A" && ch <= "Z") return true;
   if (ch === "_") return true;
-  // Modelica 3.6 allows Unicode letters as identifier start characters.
-  // Use the Unicode 'Letter' property (covers all scripts).
-  const cp = ch.codePointAt(0)!;
-  return cp > 127 && /\p{L}/u.test(ch);
+  return false;
 }
 
 function isIdentPart(ch: string): boolean {
-  if (isIdentStart(ch)) return true;
-  if (isDigit(ch)) return true;
-  // Unicode combining marks and non-ASCII decimal digits are also valid
-  // identifier continuation characters per Modelica 3.6.
-  const cp = ch.codePointAt(0)!;
-  return cp > 127 && /[\p{L}\p{N}\p{M}]/u.test(ch);
+  return isIdentStart(ch) || isDigit(ch);
 }
 
 function isDigit(ch: string): boolean {
   return ch >= "0" && ch <= "9";
 }
 ```
+
+> **\[SPEC UPDATE 2026-04-13]** — *Identifiers are ASCII-only (lexer item 2)*
+>
+> An earlier version of this section claimed that Modelica 3.6 permits Unicode letters in identifiers. This was incorrect. The spec states: *"The character set of the Modelica language is Unicode, but restricted to the Unicode characters corresponding to 7-bit ASCII characters for identifiers."* The IDENT alphabet is `a-z`, `A-Z`, `_`, and (for non-first characters) `0-9` — nothing else. String literals and quoted identifiers may still contain Unicode; only unquoted identifiers are restricted. See [phase1-subphase2-lexer.md §5](subphase2-lexer/phase1-subphase2-lexer.md) for the full callout and test-impact list.
 
 ### 2.6 Strings
 
@@ -1268,6 +1366,15 @@ parse(): StoredDefinition {
 
 ### 3.3 Class definitions
 
+> **\[SPEC UPDATE 2026-04-13 — see subphase doc]** — *Three class-specifier forms (parser items 5, 6, 12)*
+>
+> The parsing logic below is the original baseline. The spec-conformant version dispatches on three forms of `class-specifier`:
+> 1. **long-class-specifier** — both the plain `IDENT ... composition end IDENT` form and the `extends IDENT [ class-modification ] ... composition end IDENT` form (parser item 5).
+> 2. **short-class-specifier** — must consume an optional `base-prefix` (`input`/`output`) before the type-specifier (parser item 12); recognizes the `enumeration(:)` open form.
+> 3. **der-class-specifier** — `IDENT "=" der "(" type-specifier "," IDENT { "," IDENT } ")" description` (parser item 6).
+>
+> See [phase1-subphase3-parser.md §2.2](subphase3-parser/phase1-subphase3-parser.md) for the spec-compliant dispatch logic.
+
 This is the largest parsing function because Modelica class bodies have complex structure — interleaved public/protected sections, optional equation/algorithm sections, optional external declarations, and an optional trailing annotation.
 
 ```
@@ -1308,7 +1415,7 @@ private parseClassDefinition(isFinal: boolean): ClassDefinition | ShortClassDefi
     );
   }
 
-  const comment = this.parseOptionalStringComment();
+  const comment = this.parseDescriptionString();
 
   // Parse composition (body)
   const elements: Element[] = [];
@@ -1413,7 +1520,7 @@ private parseShortClassBody(
     this.expect(TokenKind.LParen);
     const enumLiterals = this.parseEnumerationList();
     this.expect(TokenKind.RParen);
-    const comment = this.parseOptionalStringComment();
+    const comment = this.parseDescriptionString();
     const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
     return {
       kind: "ShortClassDefinition",
@@ -1438,7 +1545,7 @@ private parseShortClassBody(
   const modification = this.check(TokenKind.LParen)
     ? this.parseClassModification()
     : null;
-  const comment = this.parseOptionalStringComment();
+  const comment = this.parseDescriptionString();
   const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
 
   return {
@@ -1470,7 +1577,7 @@ private parseEnumerationList(): EnumerationLiteral[] {
 
 private parseEnumerationLiteral(): EnumerationLiteral {
   const nameToken = this.expect(TokenKind.Identifier);
-  const comment = this.parseOptionalStringComment();
+  const comment = this.parseDescriptionString();
   const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
   return { name: nameToken.value as string, comment, annotation };
 }
@@ -1560,6 +1667,12 @@ private isClassRestrictionStart(): boolean {
 
 ### 3.5 Component declarations
 
+> **\[SPEC UPDATE 2026-04-13 — see subphase doc]** — *Multi-component declarations and type-level array subscripts (parser items 3, 4)*
+>
+> The single-component `parseComponentDeclaration` below is the original baseline. The spec-conformant version is `parseComponentClause` and **returns an array** of `ComponentDeclaration` nodes — one source-level component-clause like `parameter Real a = 1, b[3] = {1,2,3};` produces multiple AST nodes that share the type and prefixes. The parser must also recognize array subscripts in **two** positions: after the type (`Real[3] x;`) and after the variable name (`Real x[3];`), populating `typeArraySubscripts` and `nameArraySubscripts` independently.
+>
+> See [phase1-subphase3-parser.md §2.4](subphase3-parser/phase1-subphase3-parser.md) for the spec-compliant `parseComponentClause` implementation.
+
 ```typescript
 private parseComponentDeclaration(
   visibility: Visibility,
@@ -1611,7 +1724,7 @@ private parseComponentDeclaration(
     : null;
 
   // Optional string comment and annotation
-  const comment = this.parseOptionalStringComment();
+  const comment = this.parseDescriptionString();
   const annotation = this.check(TokenKind.Annotation)
     ? this.parseAnnotation()
     : null;
@@ -1655,6 +1768,16 @@ private parseConstrainedByClause(): ConstrainedByClause {
 ```
 
 ### 3.6 Modifications
+
+> **\[SPEC UPDATE 2026-04-13 — see subphase doc]** — *Modification grammar (parser items 9, 10, 11, 13)*
+>
+> The simplified grammar below is the original baseline. The spec-conformant rules are significantly richer:
+> - `modification` allows a third form `":=" modification-expression` (parser item 13).
+> - `modification-expression := expression | break` — `break` is allowed as a binding (parser item 11).
+> - `argument := element-modification-or-replaceable | element-redeclaration` — class-modification arguments can be replaceable or redeclaration forms, not just plain element modifications (parser item 9).
+> - `element-modification := name [ modification ] description-string` — element modifications carry a trailing description string (parser item 10).
+>
+> See [phase1-subphase3-parser.md §2.5](subphase3-parser/phase1-subphase3-parser.md) for the spec-compliant `parseModification`, `parseClassModification`, and `parseArgument` implementations.
 
 Modifications are the most recursive parsing construct. The grammar is:
 
@@ -1805,7 +1928,7 @@ private parseEquation(): EquationNode {
   const lhs = this.parseExpression();
 
   if (lhs.kind === "FunctionCallExpr" && !this.check(TokenKind.Equals)) {
-    const comment = this.parseOptionalStringComment();
+    const comment = this.parseDescriptionString();
     const annotation = this.check(TokenKind.Annotation)
       ? this.parseAnnotation() : null;
     return {
@@ -1821,7 +1944,7 @@ private parseEquation(): EquationNode {
   // Simple equation: expr = expr
   this.expect(TokenKind.Equals);
   const rhs = this.parseExpression();
-  const comment = this.parseOptionalStringComment();
+  const comment = this.parseDescriptionString();
   const annotation = this.check(TokenKind.Annotation)
     ? this.parseAnnotation() : null;
 
@@ -1845,7 +1968,7 @@ private parseConnectEquation(start: SourceLocation): ConnectEquation {
   this.expect(TokenKind.Comma);
   const to = this.parseComponentReference();
   this.expect(TokenKind.RParen);
-  const comment = this.parseOptionalStringComment();
+  const comment = this.parseDescriptionString();
   const annotation = this.check(TokenKind.Annotation)
     ? this.parseAnnotation() : null;
 
@@ -1875,7 +1998,7 @@ private parseForEquation(start: SourceLocation): ForEquation {
   this.expect(TokenKind.End);
   this.expect(TokenKind.For);
 
-  const comment = this.parseOptionalStringComment();
+  const comment = this.parseDescriptionString();
   const annotation = this.check(TokenKind.Annotation)
     ? this.parseAnnotation() : null;
 
@@ -1918,33 +2041,31 @@ The core idea: each operator has a **binding power** (a number). Higher numbers 
 
 #### Precedence table
 
-Modelica operator precedence from lowest to highest:
+Modelica operator precedence from lowest to highest. Per the spec grammar (`arithmetic-expression := [ add-operator ] term { add-operator term }` and `factor := primary [ ("^" | ".^") primary ]`), unary `+`/`-` sits at the same level as binary `+`/`-`, and `^`/`.^` is non-associative.
 
 | Level | Operators | Associativity |
 |---|---|---|
 | 1 | `or` | left |
 | 2 | `and` | left |
-| 3 | `not` | unary (prefix) |
+| 3 | `not` | prefix (one per logical-factor) |
 | 4 | `<`, `<=`, `>`, `>=`, `==`, `<>` | non-associative |
-| 5 | `+`, `-`, `.+`, `.-` | left |
+| 5 | unary `+`/`-`, binary `+`, `-`, `.+`, `.-` | left (binary); prefix (unary) at same level |
 | 6 | `*`, `/`, `.*`, `./` | left |
-| 7 | unary `+`, unary `-` | prefix |
-| 8 | `^`, `.^` | right |
+| 7 | `^`, `.^` | non-associative |
 
 The `if-then-else` expression is handled separately as a prefix construct, not as an infix operator.
 
 ```typescript
 // Binding powers (even numbers, leaving gaps for future use)
 const enum BP {
-  None       = 0,
-  Or         = 2,
-  And        = 4,
-  Not        = 6,
-  Comparison = 8,
-  Addition   = 10,
+  None           = 0,
+  Or             = 2,
+  And            = 4,
+  Not            = 6,
+  Comparison     = 8,
+  Addition       = 10,
   Multiplication = 12,
-  UnarySign  = 14,
-  Power      = 16,
+  Power          = 14,
 }
 
 private infixBindingPower(kind: TokenKind): { left: number; right: number } | null {
@@ -1959,7 +2080,7 @@ private infixBindingPower(kind: TokenKind): { left: number; right: number } | nu
     case TokenKind.GreaterEqual:
     case TokenKind.EqualEqual:
     case TokenKind.NotEqual:
-      // Non-associative: both sides use same power, so a < b < c will error
+      // Non-associative: a < b < c is a parse error
       return { left: BP.Comparison, right: BP.Comparison + 1 };
     case TokenKind.Plus:
     case TokenKind.Minus:
@@ -1973,8 +2094,8 @@ private infixBindingPower(kind: TokenKind): { left: number; right: number } | nu
       return { left: BP.Multiplication, right: BP.Multiplication + 1 };
     case TokenKind.Power:
     case TokenKind.DotPower:
-      // Right-associative: left > right, so a^b^c = a^(b^c)
-      return { left: BP.Power, right: BP.Power - 1 };
+      // Non-associative per spec: a ^ b ^ c is a parse error
+      return { left: BP.Power, right: BP.Power + 1 };
     default:
       return null;
   }
@@ -1983,9 +2104,11 @@ private infixBindingPower(kind: TokenKind): { left: number; right: number } | nu
 
 For left-associative operators, `right = left + 1` ensures that `a + b + c` parses as `(a + b) + c` — after parsing `a + b`, the next `+` has left binding power equal to the current minimum, so it does not get absorbed into the right operand.
 
-For right-associative operators (like `^`), `right = left - 1` ensures that `a ^ b ^ c` parses as `a ^ (b ^ c)` — after parsing `a`, the `^` starts a right operand parse with a lower minimum, so the next `^` gets absorbed into it.
+For non-associative operators (comparisons and `^`/`.^`), we use the same `right = left + 1` convention, which makes `a < b` work but `a < b < c` fail because the second operator would try to nest inside the first and find the binding powers don't allow it. In practice, chained comparisons and chained `^` produce a parse error, which is the correct behavior per the spec — Modelica 3.6 has no right-associative operators.
 
-For non-associative operators (comparisons), we use `right = left + 1`, which makes `a < b` work but `a < b < c` fail because the second `<` would try to nest inside the first and find the binding powers don't allow it. In practice, chained comparisons produce a parse error, which is the correct behavior — Modelica does not support them.
+> **\[SPEC UPDATE 2026-04-13]** — *Power non-associative; unary `+`/`-` at addition level (parser items 1 and 2)*
+>
+> An earlier version of this section described `^` as right-associative and placed unary `+`/`-` at a precedence level between multiplication and power (`BP.UnarySign = 14`). Both were spec divergences. The spec grammar makes `^` non-associative (only one optional `^` per `factor`) and places unary sign at the start of `arithmetic-expression`, at the same level as binary `+`/`-`. The corrected table, BP enum, and `infixBindingPower` above match the spec. The `BP.UnarySign` constant has been removed; the prefix-half handler for unary `+`/`-` now parses its operand at `BP.Multiplication` so that `-a*b` produces `Neg(Mul(a, b))`. See [phase1-subphase3-parser.md §3.2 and §3.3](subphase3-parser/phase1-subphase3-parser.md) for the full callouts and test-impact lists.
 
 #### The parsing function
 
@@ -2009,12 +2132,17 @@ private parseExpression(minBP: number = BP.None): Expression {
     left = { kind: "BooleanLiteral", span: this.spanFrom(start),
              value: this.previous.value as boolean };
   } else if (this.match(TokenKind.Not)) {
-    const operand = this.parseExpression(BP.Not);
+    // Per spec: logical-factor := [ not ] relation. The operand is a relation,
+    // so we parse at BP.Comparison.
+    const operand = this.parseExpression(BP.Comparison);
     left = { kind: "UnaryExpr", span: this.spanFrom(start),
              op: "not", operand };
   } else if (this.check(TokenKind.Minus) || this.check(TokenKind.Plus)) {
+    // Per spec: arithmetic-expression := [ add-operator ] term { add-operator term }.
+    // Unary +/- consumes a 'term', so the operand is parsed at BP.Multiplication.
+    // This produces -a*b → Neg(Mul(a, b)), matching the spec grammar's AST shape.
     const op = this.advance().kind === TokenKind.Minus ? "-" : "+";
-    const operand = this.parseExpression(BP.UnarySign);
+    const operand = this.parseExpression(BP.Multiplication);
     left = { kind: "UnaryExpr", span: this.spanFrom(start),
              op: op as UnaryOp, operand };
   } else if (this.match(TokenKind.LParen)) {
@@ -2030,6 +2158,17 @@ private parseExpression(minBP: number = BP.None): Expression {
   } else if (this.check(TokenKind.End)) {
     this.advance();
     left = { kind: "EndExpr", span: this.spanFrom(start) };
+  } else if (this.check(TokenKind.Initial) || this.check(TokenKind.Pure)) {
+    // Per spec primary rule: ( component-reference | der | initial | pure ) function-call-args
+    // 'initial' and 'pure' as primary heads behave like function calls with the keyword as the name.
+    const keyword = this.advance().kind === TokenKind.Initial ? "initial" : "pure";
+    const args = this.parseFunctionArguments();
+    left = {
+      kind: "FunctionCallExpr",
+      span: this.spanFrom(start),
+      name: { isGlobal: false, parts: [{ name: keyword, subscripts: [] }] },
+      args,
+    };
   } else if (this.check(TokenKind.Identifier) || this.check(TokenKind.Dot)
              || this.check(TokenKind.Der)) {
     left = this.parseComponentReferenceOrFunctionCall(start);
@@ -2172,6 +2311,14 @@ private parseExpressionOrRange(): Expression {
 
 #### Function arguments
 
+> **\[SPEC UPDATE 2026-04-13 — see subphase doc]** — *Function partial application (parser item 17)*
+>
+> The function-arguments parser below recognizes positional, named, and `for`-comprehension arguments. The spec also defines a fourth form, `function-partial-application := function type-specifier "(" [ named-arguments ] ")"`, which lets a function be passed as an argument with some parameters bound: `f(function g(x = 1))`. The parser must check for the `function` keyword at the start of an argument slot and produce a `FunctionPartialApplicationExpr` AST node.
+>
+> Additionally, the spec's `function-arguments-non-first` rule means that once a named argument appears, only named arguments may follow — `f(x = 1, 2)` must be rejected as positional-after-named.
+>
+> See [phase1-subphase3-parser.md §3.6](subphase3-parser/phase1-subphase3-parser.md) for the spec-compliant logic.
+
 Function arguments can be positional, named, or include for-iterators (for array comprehensions):
 
 ```typescript
@@ -2245,15 +2392,32 @@ private parseAnnotation(): Annotation {
   };
 }
 
-private parseOptionalStringComment(): string | null {
-  if (this.check(TokenKind.StringLiteral)) {
-    return this.advance().value as string;
+private parseDescriptionString(): string | null {
+  if (!this.check(TokenKind.StringLiteral)) return null;
+  let result = this.advance().value as string;
+  // Per spec: description-string := [ STRING { "+" STRING } ]
+  // After the first string, loop concatenating: + followed by another string.
+  while (this.check(TokenKind.Plus) && this.peekNextIs(TokenKind.StringLiteral)) {
+    this.advance(); // consume '+'
+    result += this.advance().value as string;
   }
-  return null;
+  return result;
 }
 ```
 
+> **\[SPEC UPDATE 2026-04-13]** — *Description-string concatenation (parser item 14)*
+>
+> The original `parseDescriptionString` returned a single string-literal value. The spec defines `description-string := [ STRING { "+" STRING } ]` — multiple string literals joined by `+` form a single description string (`"line one " + "line two"` is one comment). Renamed to `parseDescriptionString` (per spec terminology) and updated to consume the concatenation loop. The two-token check on `+` followed by `StringLiteral` is required so the parser does not mis-consume a `+` that begins an arithmetic expression. All call sites in the parser (which previously called `parseDescriptionString`) should be updated to the new name. See [phase1-subphase3-parser.md §2.10](subphase3-parser/phase1-subphase3-parser.md).
+
 ### 3.11 Statement parsing
+
+> **\[SPEC UPDATE 2026-04-13 — see subphase doc]** — *Tuple assignment empty positions and function-call RHS (parser items 8, 15)*
+>
+> The tuple-assignment parser below is the original baseline. The spec-conformant version requires two changes:
+> 1. The LHS `output-expression-list` allows **empty positions** — `(a, , c) := f(x)` is valid and means "ignore the second return value". `TupleTarget.components` becomes `(ComponentReference | null)[]`.
+> 2. The RHS must be a function call (`component-reference function-call-args`), **not an arbitrary expression**. `(a, b) := x + 1;` must be rejected.
+>
+> See [phase1-subphase3-parser.md §2.8](subphase3-parser/phase1-subphase3-parser.md) for the spec-compliant `parseTupleAssignment` implementation.
 
 Statements appear inside `algorithm` sections. They follow the same pattern as equation parsing but use `:=` for assignment and include `while` and `break`/`return` forms not available in equation sections.
 
@@ -2423,16 +2587,17 @@ END, IDENT("SpringMassDamper"), SEMICOLON, EOF
    - Left is now `BinaryExpr("*", m, der(v))`
    - No more infix operators with sufficient BP → return
    - `EQUALS` → right side of equation
-   - Prefix: `MINUS` → unary minus, operand is `parseExpression(BP.UnarySign)`
+   - Prefix: `MINUS` → unary minus, operand is `parseExpression(BP.Multiplication)` (per spec; see §2 above)
      - `IDENT("k")` → reference
-     - `STAR` (BP.Multiplication > BP.UnarySign) → absorbed, right: `IDENT("x")`
+     - `STAR` (BP.Multiplication = 12, not < minBP 12) → absorbed, right at BP=13
+     - `IDENT("x")` → reference
      - Result: `BinaryExpr("*", k, x)`
-   - Unary result: `UnaryExpr("-", BinaryExpr("*", k, x))`
+   - Unary result: `UnaryExpr("-", BinaryExpr("*", k, x))` — i.e. `-(k*x)`
    - Infix: `MINUS` (BP.Addition) → right operand at BP.Addition+1
      - `IDENT("d")` → reference
      - `STAR` (BP.Multiplication > BP.Addition+1) → absorbed, right: `IDENT("v")`
      - Result: `BinaryExpr("*", d, v)`
-   - Overall: `BinaryExpr("-", UnaryExpr("-", k*x), d*v)`
+   - Overall: `BinaryExpr("-", UnaryExpr("-", BinaryExpr("*", k, x)), BinaryExpr("*", d, v))` — i.e. `-(k*x) - d*v`
 10. `END`, verify name matches `SpringMassDamper`
 
 The resulting AST matches the structure shown in section 1.6 of the overview document.
@@ -2457,12 +2622,12 @@ Both of these are additive changes to the existing structure — the recursive d
 
 The parser should be tested at three levels:
 
-**Lexer tests.** Verify token sequences for known inputs. Focus on edge cases: nested comments, quoted identifiers, numeric literals with exponents, the `.`/`.+`/real-literal ambiguity, `true`/`false` as keywords. Each test is a string in, token sequence out.
+**Lexer tests.** Verify token sequences for known inputs. Focus on edge cases: non-nesting block comments (per spec; see §2.3), quoted identifiers, numeric literals with exponents, the `.`/`.+`/real-literal ambiguity, `true`/`false` as keywords, ASCII-only identifiers (per spec; see §2.5). Each test is a string in, token sequence out.
 
 **Expression parser tests.** Verify precedence and associativity by parsing expression strings and checking the resulting AST shape. Key cases:
 - `a + b * c` → `Add(a, Mul(b, c))`
-- `a ^ b ^ c` → `Pow(a, Pow(b, c))` (right-associative)
-- `-a * b` → `Mul(Neg(a), b)` (unary binds tighter than multiplication)
+- `a ^ b` → `Pow(a, b)` accepted; `a ^ b ^ c` → **parse error** (`^` is non-associative per spec)
+- `-a * b` → `Neg(Mul(a, b))` (unary `-` consumes a `term`; spec puts unary sign at addition level — note this differs from the original document's claim)
 - `a + b * c ^ d` → `Add(a, Mul(b, Pow(c, d)))`
 - `if a then b else c` inside larger expressions
 

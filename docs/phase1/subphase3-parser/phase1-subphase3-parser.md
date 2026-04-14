@@ -12,6 +12,49 @@ The AST node types that the parser produces are defined in the data structures d
 
 **[phase1-subphase1-data-structures.md — AST node types](../subphase1-data-structures/phase1-subphase1-data-structures.md)**
 
+The authoritative grammar reference is:
+
+**[Modelica 3.6 Concrete Syntax (Appendix A.2)](https://specification.modelica.org/maint/3.6/modelica-concrete-syntax.html)**
+
+---
+
+## Spec Conformance Update — 2026-04-13
+
+This document was revised on **2026-04-13** to bring it into complete agreement with the Modelica 3.6 Language Specification, after a verification pass against the formal grammar in Appendix A of the spec. The original version of the document had several divergences from the spec that would have produced an incorrect parser.
+
+Each change is marked with a callout of the form:
+
+> **\[SPEC UPDATE]** — *<short topic>*
+>
+> **Was:** what the original document said
+> **Now:** what the spec actually requires
+> **Spec rule:** the relevant production from Appendix A.2
+> **Action:** what the test plan, tests, and existing implementation must change
+
+These callouts can be searched for with the literal string `[SPEC UPDATE]`. Every callout corresponds to at least one change that the existing test plan, tests, and implementation must absorb. **Items 1–17 below are the full set of conformance changes** — use them as a checklist when revising test plan, tests, and implementation.
+
+### Conformance change index
+
+1. **Power operator is non-associative**, not right-associative — see §3.2, §3.3
+2. **Unary `+`/`-` binds at addition level**, not between multiplication and power — see §3.2, §3.3
+3. **Multi-component declarations** (`Real x, y, z;`) — see §2.4
+4. **Type-level array subscripts** (`Real[3] x;`) — see §2.4
+5. **Long class specifier with `extends`** (`model X extends Y(p=1) ... end X;`) — see §2.2
+6. **`der`-class-specifier** (`function f = der(g, x)`) — see §2.2
+7. **`initial` and `pure` as primary function-call prefixes** — see §3.3
+8. **Tuple assignment RHS must be a function call** — see §2.8
+9. **Class modification arguments can be `element-replaceable` or `element-redeclaration`** in addition to `element-modification` — see §2.5
+10. **Element modifications carry a description-string** — see §2.5
+11. **Modification expression can be `break`** — see §2.5
+12. **Short class specifier has a `base-prefix`** (input/output) — see §2.2
+13. **`:=` form in modifications** — see §2.5
+14. **Description strings support `+` concatenation** — see §2.10
+15. **Output-expression-list allows empty positions** (`(a, , c)`) for tuple targets — see §2.8
+16. **Array constructors support `for`-comprehensions** (`{i*2 for i in 1:N}`) — see §3.3
+17. **`function`-partial-application** in function arguments — see §3.6
+
+Several minor items (function-call-equation LHS being parsed as a full expression, type-specifier being parsed via the more general component-reference parser) are documented as **acceptable looseness** — the parser accepts a strict superset of valid Modelica, which does not affect correctness for valid input. These are noted in §5.
+
 ---
 
 ## 1. Parser Class Structure and Token Consumption Model
@@ -36,46 +79,26 @@ class Parser {
 }
 ```
 
-The parser maintains **one token of lookahead**: `current` holds the next unconsumed token. `previous` holds the token that was most recently consumed. `previous` is used to extract values from literal and identifier tokens immediately after consuming them, without needing to save a reference to the token before advancing.
-
-The constructor calls `nextToken()` once to initialize `current`. This means `current` always refers to the next token to be consumed at the start of any parsing method.
+The parser maintains **one token of lookahead**: `current` holds the next unconsumed token. `previous` holds the token that was most recently consumed.
 
 ### 1.2 Token consumption primitives
 
-Five primitives cover all token consumption:
+Five primitives cover all token consumption: `peek`, `check`, `advance`, `match`, `expect`. Their semantics are unchanged from the original document — see the implementation listing below.
 
 ```typescript
-// Return the kind of the current (not yet consumed) token.
-private peek(): TokenKind {
-  return this.current.kind;
-}
-
-// Return true if the current token has the given kind.
-private check(kind: TokenKind): boolean {
-  return this.current.kind === kind;
-}
-
-// Consume and return the current token. Sets this.previous.
+private peek(): TokenKind { return this.current.kind; }
+private check(kind: TokenKind): boolean { return this.current.kind === kind; }
 private advance(): Token {
   this.previous = this.current;
   this.current = this.lexer.nextToken();
   return this.previous;
 }
-
-// If the current token matches any of the given kinds, consume and return true.
-// Otherwise return false without consuming.
 private match(...kinds: TokenKind[]): boolean {
   for (const kind of kinds) {
-    if (this.check(kind)) {
-      this.advance();
-      return true;
-    }
+    if (this.check(kind)) { this.advance(); return true; }
   }
   return false;
 }
-
-// Consume and return the current token if it matches kind.
-// Throw a parse error if it does not.
 private expect(kind: TokenKind, message?: string): Token {
   if (this.check(kind)) return this.advance();
   throw this.error(
@@ -84,84 +107,46 @@ private expect(kind: TokenKind, message?: string): Token {
 }
 ```
 
-`check` and `match` are the primary decision-making tools. `check` is used when the code needs to inspect the token without consuming it (e.g., before deciding which branch to take). `match` is used when a particular token is optional — it consumes and returns `true` if present. `expect` is used when a particular token is required — it consumes and returns it if present, and throws if not.
-
 ### 1.3 Two-token lookahead
 
-Most parsing decisions require only one token of lookahead (`current`). One exception: when the parser sees `initial`, it must check whether the next token is `equation` or `algorithm` to decide if this is an `initial equation` / `initial algorithm` section header, or whether `initial` is an element prefix. This requires looking one token ahead of `current`.
-
-```typescript
-private peekNextIs(kind: TokenKind): boolean {
-  // Save state
-  const savedCurrent = this.current;
-  const savedPrevious = this.previous;
-  const savedPos = this.lexer.getPos(); // requires exposing pos from Lexer
-
-  this.advance();
-  const result = this.check(kind);
-
-  // Restore state
-  this.current = savedCurrent;
-  this.previous = savedPrevious;
-  this.lexer.setPos(savedPos);
-
-  return result;
-}
-```
-
-An alternative is to maintain a two-token lookahead buffer in the parser from the start, storing the next two tokens at all times. Either approach works.
+A small number of decisions need two tokens of lookahead — `initial` followed by `equation` or `algorithm` (vs. `initial` as an element prefix), and named function arguments (`name =` vs. an identifier expression followed by `==`). Implement either by save/restore around an extra `advance()`, or by keeping a two-token buffer in the parser. Both approaches work.
 
 ### 1.4 Span construction
 
-Every AST node carries a `span`. The start of a span is captured at the beginning of each parsing method; the end comes from the last token consumed:
+Every AST node carries a `span`. The pattern is unchanged:
 
 ```typescript
 private spanFrom(start: SourceLocation): Span {
-  return {
-    start,
-    end: this.previous.span.end,
-  };
+  return { start, end: this.previous.span.end };
 }
-```
-
-A typical parsing method starts with:
-
-```typescript
-const start = this.current.span.start;
-// ... consume tokens ...
-return { kind: "...", span: this.spanFrom(start), ... };
 ```
 
 ---
 
 ## 2. Recursive Descent Parsing of Modelica Grammar Rules
 
-The parser is a **recursive descent parser** — each grammar rule maps to a private method. Methods call each other according to the grammar structure. The call stack reflects the nesting of the source being parsed.
+The parser is a **recursive descent parser** — each grammar rule maps to a private method.
 
 ### 2.1 Top-level: stored definition
 
-A Modelica source file is a `stored_definition` — an optional `within` clause followed by one or more class definitions:
-
 ```
-stored_definition :=
-  [ "within" [ name ] ";" ]
-  { [ "final" ] class_definition ";" }
+stored-definition :=
+  [ within [ name ] ";" ]
+  { [ final ] class-definition ";" }
 ```
 
 ```typescript
 parse(): StoredDefinition {
   const start = this.current.span.start;
 
-  // Optional 'within' clause
   let withinPath: ComponentReference | null = null;
   if (this.match(TokenKind.Within)) {
     if (!this.check(TokenKind.Semicolon)) {
-      withinPath = this.parseComponentReference();
+      withinPath = this.parseName();
     }
     this.expect(TokenKind.Semicolon);
   }
 
-  // One or more class definitions
   const classDefinitions: StoredClassEntry[] = [];
   while (!this.check(TokenKind.EOF)) {
     const isFinal = this.match(TokenKind.Final);
@@ -170,23 +155,77 @@ parse(): StoredDefinition {
     this.expect(TokenKind.Semicolon);
   }
 
-  return {
-    kind: "StoredDefinition",
-    span: this.spanFrom(start),
-    withinPath,
-    classDefinitions,
-  };
+  return { kind: "StoredDefinition", span: this.spanFrom(start), withinPath, classDefinitions };
 }
 ```
 
 ### 2.2 Class definitions
 
-`parseClassDefinition` is the largest parsing function. It handles the class restriction keyword (`model`, `block`, etc.), optional prefix modifiers, the class name, and the class body. It also distinguishes long-form class definitions from short-form ones.
+The spec splits class definitions into three forms via `class-specifier`:
+
+```
+class-definition  := [ encapsulated ] class-prefixes class-specifier
+class-specifier   := long-class-specifier | short-class-specifier | der-class-specifier
+class-prefixes    := [ partial ]
+                     ( class | model | [ operator ] record | block
+                     | [ expandable ] connector | type | package
+                     | [ pure | impure ] [ operator ] function | operator )
+```
+
+The parser must distinguish all three forms after the class restriction has been parsed.
+
+> **\[SPEC UPDATE]** — *Long class specifier with `extends` form (item 5)*
+>
+> **Was:** the original document only handled the `IDENT description-string composition end IDENT` form.
+> **Now:** the long-class-specifier has a second form that begins with `extends`:
+> ```
+> long-class-specifier :=
+>     IDENT description-string composition end IDENT
+>   | extends IDENT [ class-modification ] description-string composition end IDENT
+> ```
+> This is the **extending class** definition (`model X extends Y(p = 1) ... end X;`), distinct from the `extends` clause that appears inside a class body. `parseClassDefinition` must check for the `extends` keyword immediately after the class restriction and, if present, parse `IDENT [ class-modification ]` as the base class extension.
+> **Spec rule:** `long-class-specifier`
+> **Action:**
+> - Add `extending: { name: ComponentReference; modification: ClassModification | null } | null` to `ClassDefinition` in the data structures.
+> - Update `parseClassDefinition` to detect and parse the `extends IDENT [ class-modification ]` form.
+> - Add tests covering `model X extends Y; ... end X;` and `model X extends Y(p = 1); ... end X;`.
+
+> **\[SPEC UPDATE]** — *`der`-class-specifier (item 6)*
+>
+> **Was:** the original document did not handle the `der`-class-specifier form at all.
+> **Now:** the spec defines a third form of class-specifier:
+> ```
+> der-class-specifier :=
+>   IDENT "=" der "(" type-specifier "," IDENT { "," IDENT } ")" description
+> ```
+> This is used to define a class as the partial derivative of another (e.g. `function f = der(g, x, y)`). `parseClassDefinition` must detect `der` after the `=` in a short-style class definition.
+> **Spec rule:** `der-class-specifier`
+> **Action:**
+> - Add a new AST node type `DerClassDefinition` (or extend `ShortClassDefinition` with a `derInfo: { baseFunction: ComponentReference; withRespectTo: string[] } | null` field).
+> - In `parseClassDefinition`, after consuming `=`, if the next token is `der`, dispatch to a new `parseDerClassBody` helper.
+> - Add tests for `function df = der(f, x);` and `function df = der(f, x, y);`.
+
+> **\[SPEC UPDATE]** — *Short class specifier `base-prefix` (item 12)*
+>
+> **Was:** the original document parsed short class specifiers without recognizing a `base-prefix`.
+> **Now:** the spec rule is:
+> ```
+> short-class-specifier :=
+>     IDENT "=" base-prefix type-specifier [ array-subscripts ]
+>     [ class-modification ] description
+>   | IDENT "=" enumeration "(" ( [ enum-list ] | ":" ) ")" description
+> base-prefix := [ input | output ]
+> ```
+> `parseShortClassBody` must consume an optional `input` or `output` keyword before the type-specifier. Note also that the enumeration form supports `enumeration(:)` for an "open" enumeration type.
+> **Spec rule:** `short-class-specifier`, `base-prefix`
+> **Action:**
+> - Add `basePrefix: { isInput: boolean; isOutput: boolean }` to `ShortClassDefinition`.
+> - Add an `isOpen: boolean` flag on `ShortClassDefinition` for the `enumeration(:)` form.
+> - Update `parseShortClassBody` to consume `input`/`output` before parsing the base type, and to recognize the `:` form inside `enumeration(...)`.
+> - Add tests for `type T = input Real;`, `type T = output Real;`, and `type E = enumeration(:);`.
 
 ```typescript
-// isFinal is passed in because the "final" keyword is consumed at the call site
-// (either at the stored-definition level or inside an element).
-private parseClassDefinition(isFinal: boolean): ClassDefinition | ShortClassDefinition {
+private parseClassDefinition(isFinal: boolean): ClassDefinition | ShortClassDefinition | DerClassDefinition {
   const start = this.current.span.start;
 
   const isEncapsulated = this.match(TokenKind.Encapsulated);
@@ -199,207 +238,89 @@ private parseClassDefinition(isFinal: boolean): ClassDefinition | ShortClassDefi
   const nameToken = this.expect(TokenKind.Identifier);
   const name = nameToken.value as string;
 
-  // Short class definition: class_prefixes IDENT "=" ...
-  // e.g.  type Length = Real(unit = "m");
-  //       type Direction = enumeration(x, y, z);
+  // Three forms: long ("extends" or plain), short ("="), der ("= der(...)")
   if (this.match(TokenKind.Equals)) {
-    return this.parseShortClassBody(
-      start, restriction, name,
-      { isFinal, isEncapsulated, isPartial, isExpandable, isPure, isImpure }
-    );
-  }
-
-  const comment = this.parseOptionalStringComment();
-
-  // Parse composition (body): interleaved public/protected sections,
-  // equation/algorithm sections, optional external declaration, optional annotation.
-  const elements: Element[] = [];
-  const equationSections: EquationSection[] = [];
-  const algorithmSections: AlgorithmSection[] = [];
-  let currentVisibility: Visibility = "public";
-  let externalDecl: ExternalDeclaration | null = null;
-  let annotation: Annotation | null = null;
-
-  while (!this.check(TokenKind.End) && !this.check(TokenKind.EOF)) {
-    if (this.match(TokenKind.Public)) {
-      currentVisibility = "public";
-    } else if (this.match(TokenKind.Protected)) {
-      currentVisibility = "protected";
-    } else if (this.check(TokenKind.Initial) && this.peekNextIs(TokenKind.Equation)) {
-      this.advance(); // consume 'initial'
-      this.advance(); // consume 'equation'
-      equationSections.push(this.parseEquationSection(true));
-    } else if (this.check(TokenKind.Initial) && this.peekNextIs(TokenKind.Algorithm)) {
-      this.advance(); // consume 'initial'
-      this.advance(); // consume 'algorithm'
-      algorithmSections.push(this.parseAlgorithmSection(true));
-    } else if (this.match(TokenKind.Equation)) {
-      equationSections.push(this.parseEquationSection(false));
-    } else if (this.match(TokenKind.Algorithm)) {
-      algorithmSections.push(this.parseAlgorithmSection(false));
-    } else if (this.match(TokenKind.External)) {
-      externalDecl = this.parseExternalDeclaration();
-    } else if (this.check(TokenKind.Annotation)) {
-      annotation = this.parseAnnotation();
-      this.expect(TokenKind.Semicolon);
-    } else {
-      elements.push(this.parseElement(currentVisibility));
+    if (this.match(TokenKind.Der)) {
+      return this.parseDerClassBody(start, restriction, name, /* prefixes */ ...);
     }
-  }
-
-  this.expect(TokenKind.End);
-  const endName = this.expect(TokenKind.Identifier);
-  if ((endName.value as string) !== name) {
-    throw this.error(
-      `Mismatched class name: opened '${name}', closed '${endName.value}'`
-    );
-  }
-
-  return {
-    kind: "ClassDefinition",
-    span: this.spanFrom(start),
-    restriction, name, isFinal, isEncapsulated, isPartial,
-    isExpandable, isPure, isImpure,
-    elements, equationSections, algorithmSections, externalDecl, annotation,
-  };
-}
-```
-
-`parseClassRestriction` maps the current keyword token to a `ClassRestriction` string. It handles the two-word forms `operator function` and `operator record` by checking for a second keyword after consuming `operator`:
-
-```typescript
-private parseClassRestriction(): ClassRestriction {
-  if (this.match(TokenKind.Model))     return "model";
-  if (this.match(TokenKind.Block))     return "block";
-  if (this.match(TokenKind.Connector)) return "connector";
-  if (this.match(TokenKind.Record))    return "record";
-  if (this.match(TokenKind.Package))   return "package";
-  if (this.match(TokenKind.Function))  return "function";
-  if (this.match(TokenKind.Type))      return "type";
-  if (this.match(TokenKind.Class))     return "class";
-  if (this.match(TokenKind.Operator)) {
-    if (this.match(TokenKind.Function)) return "operator function";
-    if (this.match(TokenKind.Record))   return "operator record";
-    return "operator";
-  }
-  throw this.error("Expected class restriction keyword");
-}
-```
-
-#### Short class definitions
-
-A short class definition uses `=` immediately after the name. Two forms exist:
-
-```typescript
-private parseShortClassBody(
-  start: SourceLocation,
-  restriction: ClassRestriction,
-  name: string,
-  prefixes: { isFinal: boolean; isEncapsulated: boolean; isPartial: boolean;
-              isExpandable: boolean; isPure: boolean; isImpure: boolean }
-): ShortClassDefinition {
-  if (this.match(TokenKind.Enumeration)) {
-    this.expect(TokenKind.LParen);
-    const enumeration = this.parseEnumerationList();
-    this.expect(TokenKind.RParen);
-    const comment = this.parseOptionalStringComment();
-    const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
-    return {
-      kind: "ShortClassDefinition", span: this.spanFrom(start),
-      ...prefixes, restriction, name,
-      baseType: null, arraySubscripts: [], modification: null,
-      enumeration, annotation, comment,
-    };
-  }
-
-  // Type specialisation: baseType name, optional array subscripts, optional modification
-  const baseType = this.parseComponentReference();
-  const arraySubscripts = this.check(TokenKind.LBracket)
-    ? this.parseArraySubscripts() : [];
-  const modification = this.check(TokenKind.LParen)
-    ? this.parseClassModification() : null;
-  const comment = this.parseOptionalStringComment();
-  const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
-
-  return {
-    kind: "ShortClassDefinition", span: this.spanFrom(start),
-    ...prefixes, restriction, name,
-    baseType, arraySubscripts, modification,
-    enumeration: null, annotation, comment,
-  };
-}
-```
-
-### 2.3 Elements
-
-Elements are the declarations inside a class body: component declarations, extends clauses, import clauses, and nested class definitions.
-
-```typescript
-private parseElement(visibility: Visibility): Element {
-  const start = this.current.span.start;
-
-  if (this.match(TokenKind.Import)) {
-    const imp = this.parseImportClause(visibility, start);
-    this.expect(TokenKind.Semicolon);
-    return imp;
+    return this.parseShortClassBody(start, restriction, name, /* prefixes */ ...);
   }
 
   if (this.match(TokenKind.Extends)) {
-    const ext = this.parseExtendsClause(visibility, start);
-    this.expect(TokenKind.Semicolon);
-    return ext;
+    // long-class-specifier, second form
+    const baseName = this.parseName();
+    const baseModification = this.check(TokenKind.LParen)
+      ? this.parseClassModification() : null;
+    const comment = this.parseDescriptionString();
+    return this.parseLongClassBody(start, restriction, name,
+      { isFinal, isEncapsulated, isPartial, isExpandable, isPure, isImpure },
+      { name: baseName, modification: baseModification }, comment);
   }
 
-  // Collect prefix flags that appear before either a class definition or
-  // a component declaration.
-  const isRedeclare   = this.match(TokenKind.Redeclare);
-  const isFinal       = this.match(TokenKind.Final);
-  const isInner       = this.match(TokenKind.Inner);
-  const isOuter       = this.match(TokenKind.Outer);
-  const isReplaceable = this.match(TokenKind.Replaceable);
-
-  // Nested class definition
-  if (this.isClassRestrictionStart()) {
-    const classDef = this.parseClassDefinition(isFinal);
-    this.expect(TokenKind.Semicolon);
-    return classDef;
-  }
-
-  // Component declaration
-  return this.parseComponentDeclaration(visibility, {
-    isRedeclare, isFinal, isInner, isOuter, isReplaceable
-  });
-}
-
-// Returns true if the current token could begin a class restriction,
-// including prefixes like 'partial', 'encapsulated', 'expandable'.
-private isClassRestrictionStart(): boolean {
-  return this.check(TokenKind.Model)
-    || this.check(TokenKind.Block)
-    || this.check(TokenKind.Connector)
-    || this.check(TokenKind.Record)
-    || this.check(TokenKind.Package)
-    || this.check(TokenKind.Function)
-    || this.check(TokenKind.Type)
-    || this.check(TokenKind.Class)
-    || this.check(TokenKind.Operator)
-    || this.check(TokenKind.Partial)
-    || this.check(TokenKind.Encapsulated)
-    || this.check(TokenKind.Expandable);
+  // long-class-specifier, first form
+  const comment = this.parseDescriptionString();
+  return this.parseLongClassBody(start, restriction, name,
+    { isFinal, isEncapsulated, isPartial, isExpandable, isPure, isImpure },
+    null, comment);
 }
 ```
 
+`parseLongClassBody` factors out the body-parsing loop (interleaved public/protected sections, equation/algorithm sections, optional external declaration, optional annotation) and the `end IDENT` close. Its body is unchanged from the original document.
+
+`parseClassRestriction` is unchanged. The `composition` body loop is unchanged.
+
+### 2.3 Elements
+
+```
+element := import-clause | extends-clause
+         | [ redeclare ] [ final ] [ inner ] [ outer ]
+           ( class-definition | component-clause
+           | replaceable ( class-definition | component-clause )
+             [ constraining-clause description ] )
+```
+
+The body of `parseElement` is unchanged at the dispatch level — it still handles import, extends, prefix flags, and dispatches to either `parseClassDefinition` or `parseComponentClause`.
+
+> **\[SPEC UPDATE]** — *Constraining clause on replaceable classes (item 10)*
+>
+> **Was:** the original document attached `constrainedBy` only to `ComponentDeclaration`.
+> **Now:** the spec allows a `constraining-clause` on a `replaceable` element regardless of whether the element is a class or a component. A nested replaceable class can be followed by `constrainedby ...`.
+> **Spec rule:** `element`, `constraining-clause`
+> **Action:**
+> - Add `constrainedBy: ConstrainedByClause | null` to `ClassDefinition` (and propagate through `ShortClassDefinition` and `DerClassDefinition`).
+> - In `parseElement`, after parsing a `replaceable` class definition, check for `constrainedby` and parse the clause.
+> - Add tests for `replaceable model X = Y constrainedby Z;` and `replaceable model X ... end X constrainedby Z;`.
+
 ### 2.4 Component declarations
 
+> **\[SPEC UPDATE]** — *Multi-component declarations (item 3) and type-level array subscripts (item 4)*
+>
+> **Was:** the original document handled exactly one component per declaration. The variable name carried any array subscripts; there was no field for type-level array subscripts.
+> **Now:** the spec defines a `component-clause` that may declare **multiple** components sharing the same type prefix and type:
+> ```
+> component-clause     := type-prefix type-specifier [ array-subscripts ] component-list
+> component-list       := component-declaration { "," component-declaration }
+> component-declaration := declaration [ condition-attribute ] description
+> declaration          := IDENT [ array-subscripts ] [ modification ]
+> ```
+> A single source-level declaration like `parameter Real a = 1, b[3] = {1, 2, 3}, c;` produces three `ComponentDeclaration` nodes that share `parameter`, `Real`, and the (optional) type-level array subscripts.
+>
+> Note also that array subscripts can appear in **two places**: after the type (`Real[3] x;`) and/or after the variable name (`Real x[3];`). The parser must capture both. They have equivalent meaning when only one is present, but both are allowed and can compose: `Real[2] x[3]` declares a 3×2 matrix.
+> **Spec rule:** `component-clause`, `component-list`, `component-declaration`, `declaration`
+> **Action:**
+> - Replace the original `parseComponentDeclaration` with a `parseComponentClause(visibility, prefixes): ComponentDeclaration[]` method that parses prefixes and the type once, then loops over comma-separated declarations.
+> - `parseElement` must collect the array of `ComponentDeclaration` nodes returned by `parseComponentClause` and append them all to the parent's elements list. The shape of `parseElement`'s return type changes from `Element` to `Element | Element[]` (or, more cleanly, `parseElement` writes directly into an out-array passed in by the caller).
+> - Add a `typeArraySubscripts: Expression[]` field to `ComponentDeclaration` for the type-level subscripts; rename the existing field to `nameArraySubscripts` (or keep `arraySubscripts` for the name-level form and add `typeArraySubscripts` separately — pick one and document it in the data structures doc).
+> - Add tests for: `Real x, y, z;`, `parameter Real a = 1, b[3] = {1,2,3};`, `Real[3] v;`, `Real v[3];`, `Real[2] m[3];`, and combinations with conditions and string comments per declaration.
+
 ```typescript
-private parseComponentDeclaration(
+// Returns an array because one component-clause can declare many components
+private parseComponentClause(
   visibility: Visibility,
   prefixes: { isRedeclare: boolean; isFinal: boolean;
               isInner: boolean; isOuter: boolean; isReplaceable: boolean }
-): ComponentDeclaration {
-  const start = this.current.span.start;
-
-  // Type prefixes
+): ComponentDeclaration[] {
+  // Type prefix (flow/stream + variability + causality)
   const isFlow   = this.match(TokenKind.Flow);
   const isStream = this.match(TokenKind.Stream);
 
@@ -412,50 +333,106 @@ private parseComponentDeclaration(
   if      (this.match(TokenKind.Input))  causality = "input";
   else if (this.match(TokenKind.Output)) causality = "output";
 
-  const typeName        = this.parseComponentReference();
-  const nameToken       = this.expect(TokenKind.Identifier);
-  const name            = nameToken.value as string;
-  const arraySubscripts = this.check(TokenKind.LBracket)
+  // Shared type-specifier and shared type-level array subscripts
+  const typeName = this.parseTypeSpecifier();
+  const typeArraySubscripts = this.check(TokenKind.LBracket)
     ? this.parseArraySubscripts() : [];
 
-  const modification = this.check(TokenKind.LParen) || this.check(TokenKind.Equals)
+  // component-list: at least one declaration, comma-separated
+  const declarations: ComponentDeclaration[] = [];
+  declarations.push(this.parseSingleComponentDeclaration(
+    visibility, prefixes, isFlow, isStream, variability, causality,
+    typeName, typeArraySubscripts));
+
+  while (this.match(TokenKind.Comma)) {
+    declarations.push(this.parseSingleComponentDeclaration(
+      visibility, prefixes, isFlow, isStream, variability, causality,
+      typeName, typeArraySubscripts));
+  }
+
+  this.expect(TokenKind.Semicolon);
+  return declarations;
+}
+
+// Parses one declaration (IDENT [array-subscripts] [modification])
+// followed by optional condition-attribute and description.
+private parseSingleComponentDeclaration(
+  visibility: Visibility,
+  prefixes: { isRedeclare: boolean; isFinal: boolean;
+              isInner: boolean; isOuter: boolean; isReplaceable: boolean },
+  isFlow: boolean, isStream: boolean,
+  variability: Variability, causality: Causality,
+  typeName: ComponentReference, typeArraySubscripts: Expression[]
+): ComponentDeclaration {
+  const start = this.current.span.start;
+  const nameToken = this.expect(TokenKind.Identifier);
+  const name = nameToken.value as string;
+
+  const nameArraySubscripts = this.check(TokenKind.LBracket)
+    ? this.parseArraySubscripts() : [];
+
+  const modification = this.check(TokenKind.LParen)
+       || this.check(TokenKind.Equals)
+       || this.check(TokenKind.Assign)
     ? this.parseModification() : null;
 
-  // Optional condition attribute: component is only present if condition is true
   const conditionAttribute = this.match(TokenKind.If)
     ? this.parseExpression() : null;
 
-  // Optional constrainedby clause — only meaningful on replaceable components
-  const constrainedBy = this.match(TokenKind.ConstrainedBy)
-    ? this.parseConstrainedByClause() : null;
-
-  const comment    = this.parseOptionalStringComment();
+  const comment    = this.parseDescriptionString();
   const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
-
-  this.expect(TokenKind.Semicolon);
 
   return {
     kind: "ComponentDeclaration",
     span: this.spanFrom(start),
     visibility, ...prefixes, isFlow, isStream,
-    variability, causality, typeName, name, arraySubscripts,
-    modification, conditionAttribute, constrainedBy, annotation, comment,
+    variability, causality, typeName,
+    typeArraySubscripts, nameArraySubscripts,
+    name, modification, conditionAttribute,
+    constrainedBy: null, // populated by parseElement when wrapped in `replaceable ... constrainedby`
+    annotation, comment,
   };
 }
 ```
 
 ### 2.5 Modifications
 
-Modifications are the most recursive construct in the grammar. The grammar is:
-
-```
-modification         := class_modification [ "=" expression ]
-                      | "=" expression
-class_modification   := "(" { element_modification "," } ")"
-element_modification := [ "each" ] [ "final" ] name [ modification ]
-```
-
-The recursion is: `parseModification` → `parseClassModification` → `parseElementModification` → `parseModification`. This handles arbitrary nesting like `R1(p(v(start = 0)))`.
+> **\[SPEC UPDATE]** — *Modification grammar (items 9, 10, 11, 13)*
+>
+> **Was:** the original document treated `class-modification` as a list of `element-modification` only; modifications used only `=`; element modifications had no description string; binding expressions were always expressions.
+> **Now:** the spec is significantly richer:
+> ```
+> modification           := class-modification [ "=" modification-expression ]
+>                         | "=" modification-expression
+>                         | ":=" modification-expression
+> modification-expression := expression | break
+> class-modification     := "(" [ argument-list ] ")"
+> argument-list          := argument { "," argument }
+> argument               := element-modification-or-replaceable | element-redeclaration
+> element-modification-or-replaceable := [ each ] [ final ] ( element-modification | element-replaceable )
+> element-modification   := name [ modification ] description-string
+> element-redeclaration  := redeclare [ each ] [ final ]
+>                           ( short-class-definition | component-clause1 | element-replaceable )
+> element-replaceable    := replaceable ( short-class-definition | component-clause1 )
+>                           [ constraining-clause ]
+> ```
+> Four substantive changes:
+> 1. **`:=` form** is allowed in addition to `=`. Some tools use `:=` to indicate an assignment-style binding rather than an equation-style binding.
+> 2. **`break`** is allowed as a modification-expression — used in conditional or `when` redeclaration contexts to mean "no binding".
+> 3. **Class modification arguments** can be `element-modification`, `element-replaceable`, or `element-redeclaration` — not just plain modifications.
+> 4. **Element modifications carry a description string** at the end (`final each x = 1 "documentation"`).
+> **Spec rule:** `modification`, `class-modification`, `argument`, `element-modification`, `element-replaceable`, `element-redeclaration`
+> **Action:**
+> - Update `Modification` AST node:
+>   - Replace `bindingExpression: Expression | null` with `binding: { kind: "equals" | "assign"; value: Expression | "break" } | null` (or split into two flags).
+> - Update `ElementModification` AST node:
+>   - Add `descriptionString: string | null`.
+> - Add new AST node types: `ElementReplaceable`, `ElementRedeclaration`. Update `ClassModification.arguments` to `(ElementModification | ElementReplaceable | ElementRedeclaration)[]`.
+> - Update `parseModification` to recognize `:=` as an alternative form, and to recognize `break` in the binding position.
+> - Update `parseElementModification` to consume an optional description string after the inner modification.
+> - Replace the body of `parseClassModification` with a new `parseArgument` dispatcher that distinguishes `redeclare ...` (→ element-redeclaration), `replaceable ...` (→ element-replaceable), and `[each] [final] name ...` (→ element-modification).
+> - Add `component-clause1` parser support — a non-recursive simplified component clause used inside redeclarations and replaceables.
+> - Add tests for: `(p := 1)`, `(redeclare X = Y)`, `(replaceable X = Y constrainedby Z)`, `(p = 1 "doc")`, `(p = break)`, and the `redeclare each final` combinations.
 
 ```typescript
 private parseModification(): Modification {
@@ -464,27 +441,31 @@ private parseModification(): Modification {
   const classModification = this.check(TokenKind.LParen)
     ? this.parseClassModification() : null;
 
-  const bindingExpression = this.match(TokenKind.Equals)
-    ? this.parseExpression() : null;
+  let binding: { kind: "equals" | "assign"; value: Expression | "break" } | null = null;
+  if (this.match(TokenKind.Equals)) {
+    binding = { kind: "equals", value: this.parseModificationExpression() };
+  } else if (this.match(TokenKind.Assign)) {
+    binding = { kind: "assign", value: this.parseModificationExpression() };
+  }
 
-  return {
-    kind: "Modification",
-    span: this.spanFrom(start),
-    classModification,
-    bindingExpression,
-  };
+  return { kind: "Modification", span: this.spanFrom(start), classModification, binding };
+}
+
+private parseModificationExpression(): Expression | "break" {
+  if (this.match(TokenKind.Break)) return "break";
+  return this.parseExpression();
 }
 
 private parseClassModification(): ClassModification {
   const start = this.current.span.start;
   this.expect(TokenKind.LParen);
 
-  const args: ElementModification[] = [];
+  const args: (ElementModification | ElementReplaceable | ElementRedeclaration)[] = [];
   if (!this.check(TokenKind.RParen)) {
-    args.push(this.parseElementModification());
+    args.push(this.parseArgument());
     while (this.match(TokenKind.Comma)) {
-      if (this.check(TokenKind.RParen)) break; // trailing comma
-      args.push(this.parseElementModification());
+      if (this.check(TokenKind.RParen)) break;
+      args.push(this.parseArgument());
     }
   }
 
@@ -492,246 +473,134 @@ private parseClassModification(): ClassModification {
   return { kind: "ClassModification", span: this.spanFrom(start), arguments: args };
 }
 
-private parseElementModification(): ElementModification {
-  const start = this.current.span.start;
+private parseArgument(): ElementModification | ElementReplaceable | ElementRedeclaration {
+  // element-redeclaration starts with 'redeclare'
+  if (this.match(TokenKind.Redeclare)) {
+    return this.parseElementRedeclaration(/* start, after consuming 'redeclare' */);
+  }
 
+  // element-modification-or-replaceable: [each] [final] (element-modification | element-replaceable)
   const isEach  = this.match(TokenKind.Each);
   const isFinal = this.match(TokenKind.Final);
-  const name    = this.parseComponentReference();
 
-  const modification = this.check(TokenKind.LParen) || this.check(TokenKind.Equals)
+  if (this.match(TokenKind.Replaceable)) {
+    return this.parseElementReplaceable(isEach, isFinal /*, start */);
+  }
+
+  return this.parseElementModification(isEach, isFinal);
+}
+
+private parseElementModification(isEach: boolean, isFinal: boolean): ElementModification {
+  const start = this.current.span.start;
+  const name = this.parseName(); // not parseComponentReference — names in modifications cannot have subscripts
+  const modification = this.check(TokenKind.LParen)
+       || this.check(TokenKind.Equals)
+       || this.check(TokenKind.Assign)
     ? this.parseModification() : null;
+  const descriptionString = this.parseDescriptionString();
 
   return {
     kind: "ElementModification",
     span: this.spanFrom(start),
-    isFinal, isEach, name, modification,
+    isFinal, isEach, name, modification, descriptionString,
   };
 }
 ```
 
 ### 2.6 Equation sections
 
-```typescript
-private parseEquationSection(isInitial: boolean): EquationSection {
-  const start = this.current.span.start;
-  const equations: EquationNode[] = [];
-
-  while (!this.isSectionEnd()) {
-    equations.push(this.parseEquation());
-    this.expect(TokenKind.Semicolon);
-  }
-
-  return { kind: "EquationSection", span: this.spanFrom(start), isInitial, equations };
-}
-
-// Returns true if the current token begins a new section or ends the class body.
-// Used to know when the current equation or algorithm section is finished.
-private isSectionEnd(): boolean {
-  return this.check(TokenKind.End)
-    || this.check(TokenKind.Public)
-    || this.check(TokenKind.Protected)
-    || this.check(TokenKind.Equation)
-    || this.check(TokenKind.Algorithm)
-    || this.check(TokenKind.Initial)
-    || this.check(TokenKind.External)
-    || this.check(TokenKind.Annotation)
-    || this.check(TokenKind.EOF);
-}
-```
+`parseEquationSection` and `isSectionEnd` are unchanged from the original document.
 
 ### 2.7 Individual equations
 
-The five equation forms are distinguished by their leading token. The tricky case is distinguishing a simple equation (`lhs = rhs`) from a function-call equation (`name(args)`) — both can start with an identifier. The parser resolves this by parsing the left side as an expression and then inspecting the result:
+The five equation forms (connect, if, for, when, simple-or-function-call) are unchanged at the dispatch level. The function-call-vs-simple disambiguation is unchanged.
+
+> **\[SPEC UPDATE]** — *Equation LHS uses `simple-expression`, not full `expression` (acceptable looseness)*
+>
+> The spec defines an equation as `( simple-expression "=" expression | ... )` — the LHS is a `simple-expression` (no `if-then-else`), the RHS is a full `expression`. The parser parses both with `parseExpression()` for simplicity, which accepts a strict superset. **No change required**, but tests should not assume the parser rejects an `if`-expression on the LHS.
+
+The for-iterator parser must change slightly: the spec's `for-index` makes the `in` clause optional only inside function arguments and array comprehensions, but it is required inside for-equations. The original document's `parseForIterator` treats `in` as always optional, which is acceptably loose. No change required.
+
+### 2.8 Statement parsing
+
+The five statement forms are unchanged at the dispatch level. The break/return forms and the if/for/while/when statement parsers are unchanged.
+
+> **\[SPEC UPDATE]** — *Tuple assignment RHS must be a function call (item 8) and may have empty positions (item 15)*
+>
+> **Was:** `parseTupleAssignment` parsed an arbitrary expression on the RHS and parsed every comma-separated component reference unconditionally on the LHS.
+> **Now:** the spec rule is:
+> ```
+> ( "(" output-expression-list ")" ":=" component-reference function-call-args ) description
+> output-expression-list := [ expression ] { "," [ expression ] }
+> ```
+> The RHS must be a `component-reference` followed by `function-call-args` — i.e., a function call, not an arbitrary expression. And the LHS `output-expression-list` allows **empty positions**: `(a, , c) := f(x)` is valid and means "ignore the second return value".
+> **Spec rule:** `statement`, `output-expression-list`
+> **Action:**
+> - Change `parseTupleAssignment` to allow empty positions in the comma-separated list. The AST should distinguish present components from skipped positions — represent each slot as `ComponentReference | null`.
+> - Update `TupleTarget.components` to `(ComponentReference | null)[]`.
+> - On the RHS, after `:=`, parse a `component-reference` followed by `function-call-args`, building a `FunctionCallExpr` directly (not a generic `parseExpression()` call).
+> - Add tests for: `(a, b) := f(x);`, `(a, , c) := f(x);`, `(, , c) := f(x);`. Also a negative test that `(a, b) := x + 1;` produces a parse error (RHS must be a function call).
 
 ```typescript
-private parseEquation(): EquationNode {
-  const start = this.current.span.start;
+private parseTupleAssignment(start: SourceLocation): AssignmentStatement {
+  this.expect(TokenKind.LParen);
+  const components: (ComponentReference | null)[] = [];
 
-  if (this.match(TokenKind.Connect)) return this.parseConnectEquation(start);
-  if (this.match(TokenKind.If))      return this.parseIfEquation(start);
-  if (this.match(TokenKind.For))     return this.parseForEquation(start);
-  if (this.match(TokenKind.When))    return this.parseWhenEquation(start);
-
-  // Parse the left side. This may produce a FunctionCallExpr (e.g. assert(...))
-  // or any other expression (e.g. a component reference or arithmetic expression).
-  const lhs = this.parseExpression();
-
-  // If it's a function call and there's no '=' following, it's a function-call equation.
-  if (lhs.kind === "FunctionCallExpr" && !this.check(TokenKind.Equals)) {
-    const comment    = this.parseOptionalStringComment();
-    const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
-    return {
-      kind: "FunctionCallEquation",
-      span: this.spanFrom(start),
-      name: lhs.name, args: lhs.args, annotation, comment,
-    };
+  // First slot — may be empty
+  if (this.check(TokenKind.Comma) || this.check(TokenKind.RParen)) {
+    components.push(null);
+  } else {
+    components.push(this.parseComponentReference());
   }
 
-  // Simple equation: lhs = rhs
-  this.expect(TokenKind.Equals);
-  const rhs        = this.parseExpression();
-  const comment    = this.parseOptionalStringComment();
-  const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
+  while (this.match(TokenKind.Comma)) {
+    if (this.check(TokenKind.Comma) || this.check(TokenKind.RParen)) {
+      components.push(null);
+    } else {
+      components.push(this.parseComponentReference());
+    }
+  }
+
+  this.expect(TokenKind.RParen);
+  this.expect(TokenKind.Assign);
+
+  // RHS must be a function call: component-reference function-call-args
+  const fnName = this.parseComponentReference();
+  if (!this.check(TokenKind.LParen)) {
+    throw this.error("Right-hand side of tuple assignment must be a function call");
+  }
+  const args = this.parseFunctionArguments();
+  const value: FunctionCallExpr = {
+    kind: "FunctionCallExpr",
+    span: this.spanFrom(start), // refine as needed
+    name: fnName, args,
+  };
 
   return {
-    kind: "SimpleEquation",
+    kind: "AssignmentStatement",
     span: this.spanFrom(start),
-    lhs, rhs, annotation, comment,
+    target: { components },
+    value,
   };
 }
 ```
 
-The connect, for, and when equation parsers:
+### 2.9 Component references and names
 
-```typescript
-private parseConnectEquation(start: SourceLocation): ConnectEquation {
-  this.expect(TokenKind.LParen);
-  const from = this.parseComponentReference();
-  this.expect(TokenKind.Comma);
-  const to   = this.parseComponentReference();
-  this.expect(TokenKind.RParen);
-  const comment    = this.parseOptionalStringComment();
-  const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
-  return { kind: "ConnectEquation", span: this.spanFrom(start), from, to, annotation, comment };
-}
+The spec distinguishes two related rules:
 
-private parseForEquation(start: SourceLocation): ForEquation {
-  const iterators = this.parseForIterators();
-  this.expect(TokenKind.Loop);
-
-  const equations: EquationNode[] = [];
-  while (!this.check(TokenKind.End)) {
-    equations.push(this.parseEquation());
-    this.expect(TokenKind.Semicolon);
-  }
-  this.expect(TokenKind.End);
-  this.expect(TokenKind.For);
-
-  const comment    = this.parseOptionalStringComment();
-  const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
-  return { kind: "ForEquation", span: this.spanFrom(start), iterators, equations, annotation, comment };
-}
-
-private parseForIterators(): ForIterator[] {
-  const iterators: ForIterator[] = [];
-  iterators.push(this.parseForIterator());
-  while (this.match(TokenKind.Comma)) {
-    iterators.push(this.parseForIterator());
-  }
-  return iterators;
-}
-
-private parseForIterator(): ForIterator {
-  const nameToken = this.expect(TokenKind.Identifier);
-  const range = this.match(TokenKind.In) ? this.parseExpressionOrRange() : null;
-  return { name: nameToken.value as string, range };
-}
+```
+name              := IDENT { "." IDENT }
+component-reference := [ "." ] IDENT [ array-subscripts ]
+                       { "." IDENT [ array-subscripts ] }
+type-specifier    := [ "." ] name
 ```
 
-The if-equation and when-equation parsers follow the same pattern — parse condition-body branches as pairs, collect them in an array, and close with `end if` or `end when`.
+`parseComponentReference` is unchanged from the original document. A new helper `parseName` is added for contexts that require the more restricted `name` form (within clauses, modification names, type names in extends clauses). Internally it can still call `parseComponentReference` and assert that no subscripts appear, or it can be implemented separately.
 
-### 2.8 Statement parsing
-
-Statements appear inside `algorithm` sections. The main differences from equations are `:=` for assignment, `while` loops, and `break`/`return`.
-
-The main disambiguation challenge is the **tuple assignment** for functions with multiple return values:
-
-```modelica
-(a, b, c) := f(x);   // tuple target
-x := f(y);           // single target
-f(x);                // function-call statement (no assignment)
-```
-
-```typescript
-private parseStatement(): Statement {
-  const start = this.current.span.start;
-
-  // Tuple assignment: (a, b, c) := expr
-  if (this.check(TokenKind.LParen)) return this.parseTupleAssignment(start);
-
-  if (this.match(TokenKind.If))     return this.parseIfStatement(start);
-  if (this.match(TokenKind.For))    return this.parseForStatement(start);
-  if (this.match(TokenKind.While))  return this.parseWhileStatement(start);
-  if (this.match(TokenKind.When))   return this.parseWhenStatement(start);
-  if (this.match(TokenKind.Return)) return { kind: "ReturnStatement", span: this.spanFrom(start) };
-  if (this.match(TokenKind.Break))  return { kind: "BreakStatement",  span: this.spanFrom(start) };
-
-  // Either a single-variable assignment or a function-call statement.
-  const ref = this.parseComponentReference();
-
-  if (this.check(TokenKind.LParen)) {
-    const args = this.parseFunctionArguments();
-    return { kind: "FunctionCallStatement", span: this.spanFrom(start), name: ref, args };
-  }
-
-  this.expect(TokenKind.Assign);
-  const value = this.parseExpression();
-  return { kind: "AssignmentStatement", span: this.spanFrom(start), target: ref, value };
-}
-
-private parseTupleAssignment(start: SourceLocation): AssignmentStatement {
-  this.expect(TokenKind.LParen);
-  const components: ComponentReference[] = [];
-  if (!this.check(TokenKind.RParen)) {
-    components.push(this.parseComponentReference());
-    while (this.match(TokenKind.Comma)) {
-      components.push(this.parseComponentReference());
-    }
-  }
-  this.expect(TokenKind.RParen);
-  this.expect(TokenKind.Assign);
-  const value = this.parseExpression();
-  return { kind: "AssignmentStatement", span: this.spanFrom(start), target: { components }, value };
-}
-```
-
-### 2.9 Component references
-
-A component reference is a dotted name with optional array subscripts at each level: `a.b[1].c[2,3]`. It appears in expressions, type names, modification names, and connect arguments.
-
-```typescript
-private parseComponentReference(): ComponentReference {
-  const isGlobal = this.match(TokenKind.Dot); // leading '.' means global lookup
-  const parts: ComponentReferencePart[] = [];
-
-  // First part: identifier or 'der' keyword (der is also valid as a component name)
-  const first = this.check(TokenKind.Der)
-    ? (this.advance(), "der")
-    : (this.expect(TokenKind.Identifier).value as string);
-
-  const firstSubs = this.check(TokenKind.LBracket) ? this.parseArraySubscripts() : [];
-  parts.push({ name: first, subscripts: firstSubs });
-
-  // Subsequent dotted parts
-  while (this.match(TokenKind.Dot)) {
-    const name = this.expect(TokenKind.Identifier).value as string;
-    const subs = this.check(TokenKind.LBracket) ? this.parseArraySubscripts() : [];
-    parts.push({ name, subscripts: subs });
-  }
-
-  return { isGlobal, parts };
-}
-
-private parseArraySubscripts(): Expression[] {
-  this.expect(TokenKind.LBracket);
-  const subscripts = [this.parseSubscript()];
-  while (this.match(TokenKind.Comma)) {
-    subscripts.push(this.parseSubscript());
-  }
-  this.expect(TokenKind.RBracket);
-  return subscripts;
-}
-
-// A subscript is either a bare ':' (all indices) or an expression (possibly a range).
-private parseSubscript(): Expression {
-  const start = this.current.span.start;
-  if (this.match(TokenKind.Colon)) {
-    return { kind: "ColonExpr", span: this.spanFrom(start) };
-  }
-  return this.parseExpressionOrRange();
-}
-```
+> **\[SPEC UPDATE]** — *`type-specifier` parsing (acceptable looseness, with helper)*
+>
+> The original document uses `parseComponentReference` everywhere a type name is needed. The spec's `type-specifier` is `["."] name`, which has no array subscripts at any level. The parser will continue to use `parseComponentReference` (renaming uses to a thin wrapper `parseTypeSpecifier`), since component-reference is a strict superset and no valid Modelica is rejected. **No required change** — `parseTypeSpecifier` is just an alias for clarity at call sites.
 
 ### 2.10 Annotations and string comments
 
@@ -742,12 +611,32 @@ private parseAnnotation(): Annotation {
   const classModification = this.parseClassModification();
   return { kind: "Annotation", span: this.spanFrom(start), classModification };
 }
+```
 
-private parseOptionalStringComment(): string | null {
-  if (this.check(TokenKind.StringLiteral)) {
-    return this.advance().value as string;
+> **\[SPEC UPDATE]** — *Description-string concatenation with `+` (item 14)*
+>
+> **Was:** `parseOptionalStringComment` returned the value of a single string literal token.
+> **Now:** the spec defines:
+> ```
+> description-string := [ STRING { "+" STRING } ]
+> ```
+> Multiple string literals joined by `+` form a single description string. Example: `"line one " + "line two"` is one description string.
+> **Spec rule:** `description-string`
+> **Action:**
+> - Rename `parseOptionalStringComment` to `parseDescriptionString` (per spec terminology).
+> - After the first string literal, loop: while the next token is `+` *and* the token after `+` is a string literal, consume both and concatenate. The two-token check is required to avoid mis-consuming a `+` that begins an expression.
+> - Add tests for: `"a"`, `"a" + "b"`, `"a" + "b" + "c"`, and the boundary case where `+` is followed by a non-string (must not consume the `+`).
+
+```typescript
+private parseDescriptionString(): string | null {
+  if (!this.check(TokenKind.StringLiteral)) return null;
+  let result = this.advance().value as string;
+  // Concatenation: STRING { "+" STRING }
+  while (this.check(TokenKind.Plus) && this.peekNextIs(TokenKind.StringLiteral)) {
+    this.advance(); // consume '+'
+    result += this.advance().value as string;
   }
-  return null;
+  return result;
 }
 ```
 
@@ -755,32 +644,52 @@ private parseOptionalStringComment(): string | null {
 
 ## 3. Pratt (Precedence Climbing) Parser for Expressions
 
-Expression parsing is where recursive descent on its own becomes awkward — Modelica has roughly 10 precedence levels and mixed associativity. A Pratt parser handles this with a single function and a binding-power table.
-
 ### 3.1 The core idea
 
-Each infix operator has a **left binding power** and a **right binding power**. The parser tracks a minimum binding power (`minBP`). It stops collecting infix operators when it encounters one whose left binding power is less than `minBP`. The right binding power of the consumed operator becomes the `minBP` for the recursive right-operand parse.
+Each infix operator has a **left binding power** and a **right binding power**. The parser tracks a minimum binding power (`minBP`) and stops collecting infix operators when the next operator's left BP is less than `minBP`. The right BP of a consumed operator becomes the `minBP` for the recursive right-operand parse.
 
-- **Left-associative:** `right = left + 1`. After parsing `a + b`, the next `+` has left BP equal to `minBP`, so it does not get absorbed into the right operand — it becomes the next iteration at the outer level, producing `(a + b) + c`.
-- **Right-associative:** `right = left - 1`. After parsing `a`, the `^` starts a right-operand parse with a lower `minBP`, so the next `^` *does* get absorbed — producing `a ^ (b ^ c)`.
-- **Non-associative:** `right = left + 1` (same as left-associative). After `a < b`, the second `<` would need to nest inside the first's right operand, but the BP check prevents it — producing a parse error, which is correct for Modelica.
+- **Left-associative:** `right = left + 1` — `a + b + c` parses as `(a + b) + c`.
+- **Non-associative:** also `right = left + 1` — `a < b < c` is rejected, which is the correct Modelica behavior.
+
+> **\[SPEC UPDATE]** — *No right-associative operators in Modelica 3.6 (related to item 1)*
+>
+> The original document described `^` as right-associative, requiring the `right = left - 1` convention. Per the spec grammar, **Modelica 3.6 has no right-associative operators**. All infix operators in the spec are either left-associative or non-associative. The `right = left - 1` convention is no longer needed and should be removed from the parser to avoid future confusion.
 
 ### 3.2 Precedence table
 
-Modelica operator precedence from lowest to highest:
+> **\[SPEC UPDATE]** — *Power is non-associative, unary `+`/`-` is at addition level (items 1 and 2)*
+>
+> **Was:** the original precedence table placed `^`/`.^` as **right-associative** at the top of the table, and unary `+`/`-` as a **separate prefix level between multiplication and power** (so `-a*b` parsed as `(-a)*b`).
+> **Now:** the spec grammar is:
+> ```
+> arithmetic-expression := [ add-operator ] term { add-operator term }
+> term                  := factor { mul-operator factor }
+> factor                := primary [ ("^" | ".^") primary ]
+> ```
+> Two consequences:
+> 1. **`^` and `.^` are non-associative.** Only one optional `^` per factor. `a ^ b ^ c` is a syntax error per the spec.
+> 2. **Unary `+`/`-` sits at the same level as binary `+`/`-`** — it is the optional `[ add-operator ]` at the start of an arithmetic-expression. So `-a*b` is `-(a*b)`, not `(-a)*b`. (Numerically equivalent for reals, but the AST shape differs and tests must check the spec-conforming shape.)
+> **Spec rule:** `factor`, `arithmetic-expression`
+> **Action:**
+> - Update the precedence table (below) and the `BP` const enum: remove `BP.UnarySign`.
+> - Change the `^`/`.^` entry in `infixBindingPower` to `right = left + 1` (non-associative).
+> - In the prefix-half handler for unary `+`/`-`, parse the operand at `BP.Multiplication` (so it absorbs `*`, `/`, `^` but not `+`, `-`). This produces `-a*b` → `-(a*b)`.
+> - Update tests:
+>   - `a ^ b ^ c` must now produce a **parse error**, not `a ^ (b ^ c)`.
+>   - `-a*b` must now produce `Neg(Mul(a, b))`, not `Mul(Neg(a), b)`.
+>   - `-a^b` still produces `Neg(Pow(a, b))` (unchanged in shape — `^` was already inside the unary in both versions).
+
+The corrected precedence table:
 
 | Level | Operators | Associativity |
 |---|---|---|
 | 1 | `or` | left |
 | 2 | `and` | left |
-| 3 | `not` | prefix |
+| 3 | `not` | prefix (one per logical-factor) |
 | 4 | `<`, `<=`, `>`, `>=`, `==`, `<>` | non-associative |
-| 5 | `+`, `-`, `.+`, `.-` | left |
+| 5 | unary `+`/`-`, binary `+`, `-`, `.+`, `.-` | left (binary); prefix (unary) at same level |
 | 6 | `*`, `/`, `.*`, `./` | left |
-| 7 | unary `+`, unary `-` | prefix |
-| 8 | `^`, `.^` | right |
-
-`if-then-else` expressions and unary `not` are handled as prefix constructs, not as infix operators.
+| 7 | `^`, `.^` | non-associative |
 
 ```typescript
 const enum BP {
@@ -791,8 +700,7 @@ const enum BP {
   Comparison     = 8,
   Addition       = 10,
   Multiplication = 12,
-  UnarySign      = 14,
-  Power          = 16,
+  Power          = 14,
 }
 
 private infixBindingPower(kind: TokenKind): { left: number; right: number } | null {
@@ -820,7 +728,7 @@ private infixBindingPower(kind: TokenKind): { left: number; right: number } | nu
       return { left: BP.Multiplication, right: BP.Multiplication + 1 };
     case TokenKind.Power:
     case TokenKind.DotPower:
-      return { left: BP.Power, right: BP.Power - 1 }; // right-associative
+      return { left: BP.Power, right: BP.Power + 1 }; // non-associative per spec
     default:
       return null;
   }
@@ -828,6 +736,37 @@ private infixBindingPower(kind: TokenKind): { left: number; right: number } | nu
 ```
 
 ### 3.3 The parsing function
+
+> **\[SPEC UPDATE]** — *Unary sign operand parses at `BP.Multiplication` (item 2)*
+>
+> The prefix-half handler for unary `+` and `-` must parse its operand at `BP.Multiplication` instead of the removed `BP.UnarySign`. This makes the unary sign consume a `term` (in spec terms) — i.e., absorb `*`, `/`, `^`, but not `+`, `-`.
+
+> **\[SPEC UPDATE]** — *`initial` and `pure` as primary function-call prefixes (item 7)*
+>
+> **Was:** the original prefix-half handler dispatched on `Identifier`, `Dot`, and `Der` for component-reference-or-function-call.
+> **Now:** the spec's `primary` rule allows four prefixes for a function-call form:
+> ```
+> ( component-reference | der | initial | pure ) function-call-args
+> ```
+> So `initial()` and `pure(f(x))` are valid primary expressions where `initial` and `pure` are special tokens (not identifiers and not component references). They behave like `der` does — parse as a function call with the keyword token forming the head.
+> **Spec rule:** `primary`
+> **Action:**
+> - In the prefix-half handler, add cases for `TokenKind.Initial` and `TokenKind.Pure` that consume the token and require a following `(` to parse function-call-args, building a `FunctionCallExpr` whose name is a synthetic single-part component reference `{ name: "initial" | "pure", subscripts: [] }`.
+> - Add tests for: `initial()`, `pure(f(x))`, and (negative) `initial` without `(` as an expression error.
+
+> **\[SPEC UPDATE]** — *Array constructors with `for` comprehensions (item 16)*
+>
+> **Was:** `parseArrayConstruct` was referenced but its body was not specified in detail; the original document did not call out the `for` form.
+> **Now:** the spec rule is:
+> ```
+> array-arguments := expression [ "," array-arguments-non-first | for for-indices ]
+> ```
+> A `{...}` array constructor can take the form `{expr for i in range}` (an array comprehension), e.g. `{i*2 for i in 1:N}`.
+> **Spec rule:** `array-arguments`
+> **Action:**
+> - In `parseArrayConstruct`, after parsing the first expression, check for `for`. If present, parse `for-indices` and produce an `ArrayConstructExpr` with a `forIterators` field set. Otherwise parse the comma-separated expression list as before.
+> - Add a `forIterators: ForIterator[] | null` field to `ArrayConstructExpr`.
+> - Add tests for: `{1, 2, 3}`, `{i*2 for i in 1:N}`, `{i+j for i in 1:N, j in 1:M}`.
 
 ```typescript
 private parseExpression(minBP: number = BP.None): Expression {
@@ -848,11 +787,12 @@ private parseExpression(minBP: number = BP.None): Expression {
     left = { kind: "BooleanLiteral", span: this.spanFrom(start),
              value: this.previous.value as boolean };
   } else if (this.match(TokenKind.Not)) {
-    const operand = this.parseExpression(BP.Not);
+    const operand = this.parseExpression(BP.Comparison);
     left = { kind: "UnaryExpr", span: this.spanFrom(start), op: "not", operand };
   } else if (this.check(TokenKind.Minus) || this.check(TokenKind.Plus)) {
+    // Unary +/- — operand parsed at multiplication level per spec
     const op = this.advance().kind === TokenKind.Minus ? "-" : "+";
-    const operand = this.parseExpression(BP.UnarySign);
+    const operand = this.parseExpression(BP.Multiplication);
     left = { kind: "UnaryExpr", span: this.spanFrom(start), op: op as UnaryOp, operand };
   } else if (this.match(TokenKind.LParen)) {
     left = this.parseExpression();
@@ -865,6 +805,16 @@ private parseExpression(minBP: number = BP.None): Expression {
     left = this.parseIfExpression(start);
   } else if (this.match(TokenKind.End)) {
     left = { kind: "EndExpr", span: this.spanFrom(start) };
+  } else if (this.check(TokenKind.Initial) || this.check(TokenKind.Pure)) {
+    // Spec: ( initial | pure ) function-call-args
+    const keyword = this.advance().kind === TokenKind.Initial ? "initial" : "pure";
+    const args = this.parseFunctionArguments();
+    left = {
+      kind: "FunctionCallExpr",
+      span: this.spanFrom(start),
+      name: { isGlobal: false, parts: [{ name: keyword, subscripts: [] }] },
+      args,
+    };
   } else if (this.check(TokenKind.Identifier) || this.check(TokenKind.Dot)
              || this.check(TokenKind.Der)) {
     left = this.parseComponentReferenceOrFunctionCall(start);
@@ -887,186 +837,116 @@ private parseExpression(minBP: number = BP.None): Expression {
 }
 ```
 
-The function has two halves. The **prefix half** (top) parses atoms and prefix operators. The **infix loop** (bottom) repeatedly checks whether the next token is an infix operator with sufficient binding power; if so, it consumes the operator, recursively parses the right operand, and folds the result into `left`.
-
 ### 3.4 Component references and function calls
 
-When the prefix parser encounters an identifier, it could be a variable reference (`x`), a dotted path (`R1.p.v`), or a function call (`sin(x)`, `der(x)`). These share a common prefix — parse the component reference first, then check for `(`:
-
-```typescript
-private parseComponentReferenceOrFunctionCall(start: SourceLocation): Expression {
-  const ref = this.parseComponentReference();
-
-  if (this.check(TokenKind.LParen)) {
-    const args = this.parseFunctionArguments();
-    return { kind: "FunctionCallExpr", span: this.spanFrom(start), name: ref, args };
-  }
-
-  return { kind: "ComponentReference", span: this.spanFrom(start), ref };
-}
-```
-
-`der(x)` falls out naturally — the `der` keyword token is parsed as a component reference with a single part `{ name: "der", subscripts: [] }`, then the `(` triggers function-call parsing. No special case is needed.
+`parseComponentReferenceOrFunctionCall` is unchanged from the original document. `der(x)` continues to fall out as a function call because the lexer produces a `Der` keyword token that the component-reference parser accepts as the first part of a name.
 
 ### 3.5 Range expressions
 
-Range expressions (`1:N`, `1:2:N`) are **not** handled as infix operators in the Pratt parser — the colon is not given a binding power. Instead, ranges are parsed as a post-Pratt check in contexts where ranges are expected (for-iterator ranges and array subscripts). This avoids ambiguity with the colon in `:=`.
-
-```typescript
-private parseExpressionOrRange(): Expression {
-  const start = this.current.span.start;
-  const first = this.parseExpression();
-
-  if (!this.match(TokenKind.Colon)) return first;
-
-  const second = this.parseExpression();
-
-  if (!this.match(TokenKind.Colon)) {
-    // Two-part range: start:stop
-    return { kind: "RangeExpr", span: this.spanFrom(start),
-             start: first, step: null, stop: second };
-  }
-
-  // Three-part range: start:step:stop
-  const third = this.parseExpression();
-  return { kind: "RangeExpr", span: this.spanFrom(start),
-           start: first, step: second, stop: third };
-}
-```
+Range expressions are handled by `parseExpressionOrRange` outside the Pratt loop, in contexts where ranges are expected. Unchanged from the original document.
 
 ### 3.6 Function arguments
 
-Function arguments can be positional, named (`name = value`), or include for-iterators (for array comprehensions):
+> **\[SPEC UPDATE]** — *`function`-partial-application (item 17)*
+>
+> **Was:** `parseFunctionArguments` recognized positional, named, and `for`-comprehension arguments.
+> **Now:** the spec adds a fourth form, `function-partial-application`, which lets a function be passed as an argument with some parameters bound:
+> ```
+> function-arguments := expression [ "," function-arguments-non-first | for for-indices ]
+>                     | function-partial-application [ "," function-arguments-non-first ]
+>                     | named-arguments
+> function-partial-application := function type-specifier "(" [ named-arguments ] ")"
+> ```
+> A function-partial-application appears at any positional argument slot. Example: `Modelica.Math.Nonlinear.solveOneNonlinearEquation(function f(p = 1), 0, 1)`.
+> **Spec rule:** `function-arguments`, `function-partial-application`
+> **Action:**
+> - Add a new expression AST node: `FunctionPartialApplicationExpr { kind: "FunctionPartialApplicationExpr"; span: Span; functionName: ComponentReference; namedArguments: { name: string; value: Expression }[] }`.
+> - In `parseFunctionArguments`, when the current token is `function`, parse `function type-specifier "(" [ named-arguments ] ")"` and produce the new node. The result occupies a positional slot.
+> - Update `FunctionArguments` type to allow the new expression as a positional argument (it is just an `Expression`, so it already fits if added to the `Expression` union).
+> - Add tests for: `f(function g())`, `f(function g(x = 1))`, `f(function g(x = 1, y = 2), 0, 1)`.
 
-```typescript
-private parseFunctionArguments(): FunctionArguments {
-  this.expect(TokenKind.LParen);
+> **\[SPEC UPDATE]** — *Note on `function-arguments-non-first` ordering*
+>
+> The spec's `function-arguments-non-first` rule means that once a named argument appears in the argument list, only named arguments may follow. The original parser's `parseFunctionArgumentList` should enforce this. Tests should cover: `f(1, 2, x = 3, y = 4)` (valid), `f(x = 1, 2)` (invalid — positional after named).
 
-  const positional: Expression[] = [];
-  const named: { name: string; value: Expression }[] = [];
-  let forIterators: ForIterator[] | null = null;
+### 3.7 If-expression and `tokenToOp`
 
-  if (!this.check(TokenKind.RParen)) {
-    this.parseFunctionArgumentList(positional, named);
-    if (this.match(TokenKind.For)) {
-      forIterators = this.parseForIterators();
-    }
-  }
-
-  this.expect(TokenKind.RParen);
-  return { positional, named, forIterators };
-}
-```
-
-Distinguishing named from positional arguments requires checking if the current token is an identifier followed by `=` (but not `==`). This is one of the places where two-token lookahead is useful — peek ahead to confirm `=` before consuming the identifier name.
-
-### 3.7 If-expression
-
-```typescript
-private parseIfExpression(start: SourceLocation): IfExpr {
-  const condition = this.parseExpression();
-  this.expect(TokenKind.Then);
-  const thenExpr = this.parseExpression();
-
-  const elseIfs: { condition: Expression; value: Expression }[] = [];
-  while (this.match(TokenKind.ElseIf)) {
-    const c = this.parseExpression();
-    this.expect(TokenKind.Then);
-    const v = this.parseExpression();
-    elseIfs.push({ condition: c, value: v });
-  }
-
-  this.expect(TokenKind.Else);
-  const elseExpr = this.parseExpression();
-
-  return { kind: "IfExpr", span: this.spanFrom(start), condition, thenExpr, elseIfs, elseExpr };
-}
-```
-
-### 3.8 `tokenToOp` helper
-
-After consuming an infix operator token in the Pratt loop, `tokenToOp` maps the `TokenKind` to the `BinaryOp` string expected by the AST node:
-
-```typescript
-private tokenToOp(token: Token): BinaryOp {
-  switch (token.kind) {
-    case TokenKind.Plus:         return "+";
-    case TokenKind.Minus:        return "-";
-    case TokenKind.Star:         return "*";
-    case TokenKind.Slash:        return "/";
-    case TokenKind.Power:        return "^";
-    case TokenKind.DotPlus:      return ".+";
-    case TokenKind.DotMinus:     return ".-";
-    case TokenKind.DotStar:      return ".*";
-    case TokenKind.DotSlash:     return "./";
-    case TokenKind.DotPower:     return ".^";
-    case TokenKind.LessThan:     return "<";
-    case TokenKind.LessEqual:    return "<=";
-    case TokenKind.GreaterThan:  return ">";
-    case TokenKind.GreaterEqual: return ">=";
-    case TokenKind.EqualEqual:   return "==";
-    case TokenKind.NotEqual:     return "<>";
-    case TokenKind.And:          return "and";
-    case TokenKind.Or:           return "or";
-    default: throw this.error(`Not a binary operator: ${TokenKind[token.kind]}`);
-  }
-}
-```
+Unchanged from the original document.
 
 ---
 
 ## 4. Error Reporting and Recovery
 
-### 4.1 Error reporting
+Sections 4.1 (error reporting), 4.2 (panic mode), 4.3 (recovery as a future improvement), and 4.4 (expected-token sets) are unchanged from the original document. The new error cases introduced by the spec-conformance updates above (e.g., "right-hand side of tuple assignment must be a function call", `a ^ b ^ c` being a syntax error) use the same `error()` helper and are reported in the same `file:line:col: message` format.
 
-The parser uses the current token's source location in all error messages:
+---
 
-```typescript
-private error(message: string): Error {
-  const loc = this.current.span.start;
-  return new Error(`${loc.file}:${loc.line}:${loc.column}: ${message}`);
-}
-```
+## 5. Acceptable Looseness — Where the Parser Is More Permissive Than the Spec
 
-`expect` uses this to produce specific messages when a required token is missing. The default message names both the expected and the actual token kind; callers can supply a more descriptive message when the default is confusing:
+These are the cases where the parser deliberately accepts a strict superset of valid Modelica. They are not bugs and require no implementation changes; they are listed here so future readers do not mistake them for spec divergences.
 
-```typescript
-this.expect(TokenKind.Semicolon, "Expected ';' after class definition");
-```
+1. **Function-call equation LHS** — the spec says `component-reference function-call-args`; the parser parses an arbitrary expression and checks `lhs.kind === "FunctionCallExpr"`. Accepts everything valid plus some malformed inputs that produce confusing errors.
+2. **Equation LHS allows `if`-expression** — the spec restricts LHS to `simple-expression`; the parser uses `parseExpression()`. No valid Modelica is rejected.
+3. **`type-specifier` parsed via `parseComponentReference`** — the spec's `type-specifier` is `["."] name` with no array subscripts; the parser allows the more general form via a thin `parseTypeSpecifier` wrapper around `parseComponentReference`. No valid Modelica is rejected.
+4. **For-iterator `in` clause** — the spec requires `in` inside for-equations and for-statements but allows it to be omitted inside function arguments and array comprehensions. The parser treats `in` as always optional. No valid Modelica is rejected.
 
-The class name match check at the end of `parseClassDefinition` is an example of a context-sensitive error:
+---
 
-```typescript
-if ((endName.value as string) !== name) {
-  throw this.error(
-    `Mismatched class name: opened '${name}', closed '${endName.value}'`
-  );
-}
-```
+## 6. Update Summary for Test Plan, Tests, and Implementation
 
-### 4.2 Panic mode (initial strategy)
+The following is a consolidated checklist derived from the `[SPEC UPDATE]` callouts above. Every item must be addressed in the test plan, tests, and implementation.
 
-The initial implementation uses **panic mode**: when an unexpected token is encountered, throw immediately. The error propagates up the call stack and is caught at the top-level entry point, which prints the message and exits. This stops at the first error.
+### Data structure changes
 
-Panic mode is sufficient for early development. It is simple, requires no extra bookkeeping, and produces precise error messages with source locations.
+- `ClassDefinition`: add `extending: { name; modification } | null`, add `constrainedBy: ConstrainedByClause | null`.
+- `ShortClassDefinition`: add `basePrefix: { isInput; isOutput }`, add `isOpen: boolean` for `enumeration(:)`.
+- New AST node: `DerClassDefinition` (or `ShortClassDefinition.derInfo`).
+- `ComponentDeclaration`: add `typeArraySubscripts: Expression[]`; rename existing `arraySubscripts` to `nameArraySubscripts` (or document the convention).
+- `Modification`: replace `bindingExpression` with a binding object that distinguishes `=` vs `:=` and supports `break`.
+- `ElementModification`: add `descriptionString: string | null`.
+- `ClassModification.arguments`: change to `(ElementModification | ElementReplaceable | ElementRedeclaration)[]`.
+- New AST nodes: `ElementReplaceable`, `ElementRedeclaration`.
+- `ArrayConstructExpr`: add `forIterators: ForIterator[] | null`.
+- `TupleTarget.components`: change to `(ComponentReference | null)[]` to allow empty positions.
+- New AST node: `FunctionPartialApplicationExpr` (added to the `Expression` union).
 
-### 4.3 Error recovery (future improvement)
+### Parser logic changes
 
-For better user experience, the parser can be extended to report multiple errors per run. The strategy is **synchronization**: catch the thrown error inside a section-parsing loop, skip tokens until a synchronization point, then resume. Synchronization points are tokens that reliably begin a new construct — typically:
+- `parseClassDefinition`: detect three forms (long, long-with-extends, short, der), dispatch accordingly.
+- `parseShortClassBody`: consume optional `input`/`output` `base-prefix`; recognize `enumeration(:)`.
+- New `parseDerClassBody` method.
+- `parseComponentClause` returns `ComponentDeclaration[]`; `parseElement` collects them all into the parent's elements list.
+- `parseSingleComponentDeclaration` accepts shared type/prefix parameters.
+- `parseElement`: when wrapping a `replaceable` class definition, attach `constrainedBy` to the class node.
+- `parseModification`: accept `:=` form; recognize `break` as binding value.
+- `parseClassModification`: dispatch arguments via new `parseArgument` (element-modification, element-replaceable, element-redeclaration).
+- `parseElementModification`: consume trailing description-string.
+- New methods: `parseElementReplaceable`, `parseElementRedeclaration`, and a `parseComponentClause1` for non-recursive component clauses inside redeclarations.
+- `parseTupleAssignment`: allow empty positions; require function call on RHS.
+- `parseDescriptionString` (renamed from `parseOptionalStringComment`): support `STRING { "+" STRING }` concatenation.
+- Pratt parser: remove `BP.UnarySign`; unary `+`/`-` operand parses at `BP.Multiplication`; `^`/`.^` is non-associative (`right = left + 1`).
+- `parseExpression` prefix half: add cases for `Initial` and `Pure` producing function calls.
+- `parseArrayConstruct`: support `for`-comprehension form.
+- `parseFunctionArguments`: support `function-partial-application` form; enforce that no positional argument follows a named argument.
 
-- `;` (end of an element or equation)
-- `end` (end of a class body)
-- `equation`, `algorithm`, `public`, `protected` (beginning of a new section)
-- `model`, `block`, `connector`, etc. (beginning of a new class definition)
+### New tests required
 
-This is an additive change to the existing structure — the recursive descent architecture naturally supports recovery because each parsing method has a clear scope within which it can catch and recover.
+The conformance items above each list specific test cases. At minimum, the test plan must add:
 
-### 4.4 Expected-token sets (future improvement)
-
-When `expect` fails, the error names one expected token. A richer version can collect the full set of tokens that would be valid at the current point and include them in the message:
-
-```
-tests/Bad.mo:7:3: Unexpected 'equation' — expected one of: identifier, 'extends', 'import'
-```
-
-This requires passing context from calling functions down into `expect`, which is a minor restructuring. It does not change the parser's correctness and can be deferred until the initial implementation is working.
+1. Power non-associativity: `a ^ b ^ c` rejected; `a ^ b` accepted.
+2. Unary precedence: `-a*b` produces `Neg(Mul(a, b))`.
+3. Multi-component declarations: `Real x, y, z;`, `parameter Real a = 1, b[3] = {1,2,3};`.
+4. Type-level array subscripts: `Real[3] x;`, `Real[2] m[3];`.
+5. Long class with `extends`: `model X extends Y(p = 1); ... end X;`.
+6. `der`-class-specifier: `function df = der(f, x);`.
+7. `initial()` and `pure(f(x))` as primaries.
+8. Tuple assignment: `(a, , c) := f(x);` (and reject `(a, b) := x + 1;`).
+9. Modification arguments: `replaceable`, `redeclare`, with `each`/`final` combinations.
+10. Element modification description strings: `(p = 1 "doc")`.
+11. Modification `break`: `(p = break)`.
+12. Short class `base-prefix`: `type T = input Real;`.
+13. Modification `:=`: `(p := 1)`.
+14. Description string concatenation: `"a" + "b"`.
+15. Tuple-target empty positions covered in item 8.
+16. Array comprehensions: `{i*2 for i in 1:N}`.
+17. `function`-partial-application: `f(function g(x = 1))`.

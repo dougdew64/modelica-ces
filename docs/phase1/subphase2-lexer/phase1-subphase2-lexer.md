@@ -5,11 +5,34 @@ This document describes the implementation of the Modelica lexer (tokenizer). Th
 Scope:
 - Lexer class structure and state
 - Character scanning and token recognition
-- Handling of Modelica-specific lexing rules: nested block comments, quoted identifiers, numeric literals, keywords vs. identifiers, and elementwise operators
+- Handling of Modelica-specific lexing rules: block comments, quoted identifiers, numeric literals, keywords vs. identifiers, and elementwise operators
 
 The token types and keyword table that the lexer produces are defined in the data structures document:
 
 **[phase1-subphase1-data-structures.md — Token types and keyword table](../subphase1-data-structures/phase1-subphase1-data-structures.md)**
+
+The authoritative lexical reference is:
+
+**[Modelica 3.6 Concrete Syntax — Lexical Conventions (Appendix A.1)](https://specification.modelica.org/maint/3.6/modelica-concrete-syntax.html)**
+**[Modelica 3.6 Lexical Structure](https://specification.modelica.org/maint/3.6/lexical-structure.html)**
+
+---
+
+## Spec Conformance Update — 2026-04-13
+
+This document was revised on **2026-04-13** as part of the same conformance pass that updated the parser design document ([phase1-subphase3-parser.md](../subphase3-parser/phase1-subphase3-parser.md)) against the Modelica 3.6 Language Specification. Verifying the lexer against Appendix A.1 surfaced three real divergences from the spec, all of which are fixed below.
+
+Each change is marked with a `[SPEC UPDATE]` callout in the same Was/Now/Spec rule/Action format used in the parser and data-structures documents. Search for `[SPEC UPDATE]` to find every change. The test plan, tests, and existing implementation in `src/phase1/lexer.ts` (or wherever the lexer lives) must be revised to match.
+
+### Conformance change index
+
+1. **Block comments do NOT nest** — see §3
+2. **Identifiers are ASCII-only** — see §5
+3. **Quoted identifiers have a restricted character set** (acceptable looseness — see §5 and §7)
+
+### Relationship to the parser update
+
+The parser's seventeen spec-conformance fixes were also reviewed against the lexer to determine whether any new tokens or new keywords are required. Result: **none**. Every keyword the parser dispatches on for the new behavior — `initial`, `pure`, `break`, `function`, `replaceable`, `redeclare`, `der`, `extends`, `enumeration`, `input`, `output` — is already in the lexer's keyword table. Every punctuation/operator token the new parsing logic uses (`:=`, `:`, `+` for description-string concatenation, etc.) is already produced. **No additions to the token kind enum or keyword table are needed for the parser updates.** The keyword set in `src/phase1/data-structures.ts` should still be cross-checked against the spec's reserved-word list to confirm — the lexer was built from a 59-word list and the spec lists the same 59 reserved words, but the verification should be done again as part of the conformance pass.
 
 ---
 
@@ -154,33 +177,38 @@ private skipWhitespaceAndComments(): void {
 }
 ```
 
-### 3.1 Nested block comments
+### 3.1 Block comments do not nest
 
-Modelica block comments support nesting: `/* outer /* inner */ still outer */`. The lexer maintains a depth counter and only ends the comment when the counter returns to zero. This differs from C and Java, where `*/` always ends the comment.
+> **\[SPEC UPDATE]** — *Block comments do not nest (lexer item 1)*
+>
+> **Was:** the original document said Modelica block comments support nesting and described a depth counter implementation. This was incorrect.
+> **Now:** the spec explicitly states: *"Delimited Modelica comments do not nest, i.e., `/* */` cannot be embedded within `/* … */`."* Block comments behave the same as in C and Java — the first `*/` after a `/*` ends the comment, regardless of any intervening `/*`.
+> **Spec reference:** Modelica 3.6 lexical structure, "Comments" subsection.
+> **Action:**
+> - Replace `scanBlockComment` with the simple non-nesting version below.
+> - Remove the depth counter from the lexer state and from any helper methods.
+> - Update tests:
+>   - `/* foo */` accepted (unchanged).
+>   - `/* foo /* bar */` accepted as a single comment (the `/*` inside is part of the comment text, not a new opening). The original tests likely treated this as the start of a nested comment.
+>   - `/* foo /* bar */ baz */` is **a comment `/* foo /* bar */` followed by the tokens `baz`, `*`, `/`** — not one nested comment. Any test that expected the whole thing to be a single comment must be revised.
+>   - Unterminated `/* foo` still produces an error.
 
 ```typescript
 private scanBlockComment(): void {
-  let depth = 1;
-  while (!this.isAtEnd() && depth > 0) {
-    if (this.peek() === "/" && this.peekNext() === "*") {
-      this.advance();
-      this.advance();
-      depth++;
-    } else if (this.peek() === "*" && this.peekNext() === "/") {
-      this.advance();
-      this.advance();
-      depth--;
-    } else {
-      this.advance();
+  // The opening "/*" has already been consumed by the caller.
+  while (!this.isAtEnd()) {
+    if (this.peek() === "*" && this.peekNext() === "/") {
+      this.advance(); // consume *
+      this.advance(); // consume /
+      return;
     }
+    this.advance();
   }
-  if (depth > 0) {
-    throw this.error("Unterminated block comment");
-  }
+  throw this.error("Unterminated block comment");
 }
 ```
 
-The counter starts at 1 because the opening `/*` was consumed by the caller before `scanBlockComment` is invoked. Each subsequent `/*` increments the counter; each `*/` decrements it. The loop exits when `depth` reaches zero. If the source ends before the comment is closed, an error is thrown.
+The non-nesting behavior matches C, C++, and Java exactly: scan forward until the first `*/`, consume it, and return. If end-of-source is reached first, throw an unterminated-comment error.
 
 ---
 
@@ -252,6 +280,20 @@ The critical disambiguation is `1.` vs. `1.+`. When the dot is followed by an el
 
 ## 5. Identifiers and Keywords
 
+> **\[SPEC UPDATE]** — *Identifiers are ASCII-only (lexer item 2)*
+>
+> **Was:** the original document said *"Modelica 3.6 permits Unicode letters as identifier start characters"* and used `\p{L}` regular-expression checks for non-ASCII characters in `isIdentStart`/`isIdentPart`. This was incorrect.
+> **Now:** the spec states: *"The character set of the Modelica language is Unicode, but restricted to the Unicode characters corresponding to 7-bit ASCII characters for identifiers."* The IDENT alphabet is exactly: `a-z`, `A-Z`, `_`, and (for non-first characters) `0-9`. No Unicode letters, combining marks, or non-ASCII digits are allowed in unquoted identifiers.
+>
+> Note: this restriction applies only to **unquoted** identifiers. Quoted identifiers (`'…'`) and string literals can still contain a wider character set — see §7 below.
+> **Spec reference:** Modelica 3.6 lexical structure, "Identifiers" subsection; Appendix A.1 `IDENT`, `NON-DIGIT`.
+> **Action:**
+> - Replace `isIdentStart` and `isIdentPart` with the strict ASCII-only versions shown below.
+> - Update tests:
+>   - Negative test: `Real café = 1.0;` — `é` should now produce a lex error (the original parser may have accepted this).
+>   - Positive tests: standard ASCII identifiers, identifiers with digits, leading underscores, mixed case — unchanged.
+>   - Confirm that string literals containing non-ASCII characters (e.g., `"naïve"`) are still accepted — strings are full Unicode per the spec.
+
 After consuming the first character (which passed `isIdentStart`), `scanIdentifierOrKeyword` consumes all remaining identifier characters and then checks the keyword table.
 
 ```typescript
@@ -277,17 +319,11 @@ function isIdentStart(ch: string): boolean {
   if (ch >= "a" && ch <= "z") return true;
   if (ch >= "A" && ch <= "Z") return true;
   if (ch === "_") return true;
-  // Modelica 3.6 permits Unicode letters as identifier start characters
-  const cp = ch.codePointAt(0)!;
-  return cp > 127 && /\p{L}/u.test(ch);
+  return false;
 }
 
 function isIdentPart(ch: string): boolean {
-  if (isIdentStart(ch)) return true;
-  if (isDigit(ch)) return true;
-  // Unicode combining marks and non-ASCII decimal digits are also valid
-  const cp = ch.codePointAt(0)!;
-  return cp > 127 && /[\p{L}\p{N}\p{M}]/u.test(ch);
+  return isIdentStart(ch) || isDigit(ch);
 }
 ```
 
@@ -380,6 +416,13 @@ private scanQuotedIdentifier(): Token {
 
 Quoted identifiers produce `TokenKind.Identifier` — the same kind as unquoted identifiers. The quotes are a lexical detail; the parser and all later phases receive only the name string.
 
+> **\[SPEC UPDATE]** — *Quoted identifier character set is restricted (lexer item 3, acceptable looseness)*
+>
+> **Was:** the original document allowed any character inside a quoted identifier (other than backslash and the closing single quote).
+> **Now:** the spec defines `Q-CHAR` (the character class allowed inside `'…'`) as exactly: `NON-DIGIT`, `DIGIT`, plus the 28 special characters `! # $ % & ( ) * + , - . / : ; < > = ? @ [ ] ^ { } | ~` `<space>` and `"`. Notably, **non-ASCII characters are not allowed inside a quoted identifier**, even though they are allowed inside string literals. Only the listed ASCII characters and the standard escape sequences (`\'`, `\"`, `\?`, `\\`, `\a`, `\b`, `\f`, `\n`, `\r`, `\t`, `\v`) are valid.
+> **Spec reference:** Modelica 3.6 Appendix A.1, `Q-IDENT` and `Q-CHAR`.
+> **Action (acceptable looseness):** the parser will continue to accept the more permissive form. The current `scanQuotedIdentifier` is a strict superset of the spec: any valid Modelica quoted identifier is accepted; some non-ASCII content is also accepted that the spec rejects. **No required code change** unless strict conformance is desired. If strict conformance is required, add a `isQChar(ch)` predicate that checks against the explicit Q-CHAR set, and reject any character outside it. Tests in this case should cover: `'foo bar'` accepted, `'foo"bar'` accepted, `'foo\'bar'` accepted via escape, `'naïve'` rejected (non-ASCII), `'foo\u0007bar'` rejected (control character outside Q-CHAR).
+
 ---
 
 ## 8. Dot and Elementwise Operators
@@ -470,3 +513,50 @@ tests/Bad.mo:5:12: Unexpected character: '@'
   parameter Real @x = 1.0;
              ^
 ```
+
+---
+
+## 11. Update Summary for Test Plan, Tests, and Implementation
+
+This section consolidates the changes from the 2026-04-13 spec-conformance update for use when revising the test plan, tests, and existing implementation in `src/phase1/lexer.ts`.
+
+### Lexer logic changes (required)
+
+1. **Block comments do not nest** (§3.1) — replace `scanBlockComment` with the simple non-nesting version. Remove the depth counter from any helper or state. Behavioral change: `/* foo /* bar */ baz */` is no longer parsed as one comment.
+2. **Identifiers are ASCII-only** (§5) — replace `isIdentStart` and `isIdentPart` with the ASCII-only versions. Behavioral change: `Real café = 1.0;` now produces a lex error at `é`.
+
+### Lexer logic changes (optional / acceptable looseness)
+
+3. **Quoted identifier Q-CHAR** (§7) — the current implementation is more permissive than the spec. No required change. If strict conformance is desired, add an `isQChar` predicate.
+
+### No-change items prompted by the parser update
+
+The parser conformance pass (items 1–17 in [phase1-subphase3-parser.md](../subphase3-parser/phase1-subphase3-parser.md)) was reviewed against the lexer:
+
+- **No new tokens** — every token kind referenced by the new parser logic is already in `TokenKind`.
+- **No new keywords** — every keyword the new parser dispatches on (`initial`, `pure`, `break`, `function`, `replaceable`, `redeclare`, `der`, `extends`, `enumeration`, `input`, `output`) is already in the keyword table.
+- **No new escape sequences or numeric forms** — the parser changes affect grammar above the lexical layer only.
+
+A cross-check of the 59-keyword set in `src/phase1/data-structures.ts` against the spec's reserved-word list should be performed once as part of the conformance pass to confirm the keyword table is exact.
+
+### New tests required
+
+1. **Block comment non-nesting:**
+   - Positive: `/* foo */` accepted as one comment.
+   - Positive: `/* foo /* bar */` accepted as one comment (the inner `/*` is part of the comment text).
+   - Boundary: `/* foo /* bar */ baz */` produces tokens `Identifier(baz)`, `Star`, `Slash` after the closing `*/` — not one nested comment. Replaces any prior nested-comment test.
+   - Error: `/* foo` produces an unterminated-comment error.
+
+2. **Identifier ASCII-only:**
+   - Negative: `café` produces a lex error.
+   - Negative: identifiers starting with non-ASCII characters produce errors.
+   - Positive: `_x`, `x_`, `Real`, `Integer`, `myVar1`, `_123abc` — all unchanged.
+   - Positive (sanity): `"naïve"` (a string literal containing non-ASCII) is still accepted — strings remain full Unicode.
+
+3. **Optional, if strict Q-CHAR conformance is implemented:**
+   - Positive: `'foo bar'`, `'foo.bar'`, `'foo"bar'`, `'foo\'bar'` accepted.
+   - Negative: `'naïve'`, `'foo\u0007bar'` rejected.
+
+### Test cases that are unchanged
+
+All existing tests for numeric literals (integer, real, exponent, the `1.+x` ambiguity), string literals and escape sequences, dot/elementwise operator disambiguation, two-character operator tokens (`==`, `:=`, `<=`, `<>`, `>=`), the keyword vs. identifier check, and `true`/`false` → `BooleanLiteral` conversion are unaffected by the conformance update and should continue to pass without modification.

@@ -113,11 +113,11 @@ Deno.test("U-LEX-11: Tokens before and after a block comment are returned", () =
   ]);
 });
 
-Deno.test("U-LEX-12: Nested block comments are handled correctly", () => {
-  assertEquals(lexKinds("x /* outer /* inner */ outer */ y"), [
-    TokenKind.Identifier,
-    TokenKind.Identifier,
-  ]);
+Deno.test("U-LEX-12: Block comments do not nest — inner /* is part of the comment text", () => {
+  // Per Modelica 3.6 spec: /* ... */ does NOT nest. The first */ after /* ends
+  // the comment. So "/* foo /* bar */" is ONE comment (the inner /* is literal),
+  // and it has no following tokens.
+  assertEquals(lexKinds("/* foo /* bar */"), []);
 });
 
 Deno.test("U-LEX-13: An unterminated block comment throws", () => {
@@ -477,4 +477,38 @@ Deno.test("U-LEX-64: Error message includes file:line:col: prefix", () => {
     Error,
     "test.mo:1:1:",
   );
+});
+
+// =============================================================================
+// 19. Block comment non-nesting boundary case
+// =============================================================================
+
+Deno.test("U-LEX-65: /* foo /* bar */ baz */ is a comment then baz, *, /", () => {
+  // Per spec: the first */ ends the comment. So:
+  //   /* foo /* bar */   — one comment
+  //   baz                — Identifier
+  //   */                 — Star then Slash
+  assertEquals(lexKinds("/* foo /* bar */ baz */"), [
+    TokenKind.Identifier,
+    TokenKind.Star,
+    TokenKind.Slash,
+  ]);
+});
+
+// =============================================================================
+// 20. Identifiers are ASCII-only
+// =============================================================================
+
+Deno.test("U-LEX-66: Non-ASCII character in an identifier throws a lex error", () => {
+  // Per spec: IDENT alphabet is a-z, A-Z, _, and 0-9 (non-first positions).
+  // 'café' contains 'é' which is not in the IDENT character set.
+  assertThrows(() => lex("café"), Error);
+});
+
+Deno.test("U-LEX-67: String literals still accept non-ASCII characters (full Unicode)", () => {
+  // Per spec: the identifier restriction is ASCII-only, but string literals
+  // remain full Unicode.
+  const tok = lexOne('"naïve"');
+  assertEquals(tok.kind, TokenKind.StringLiteral);
+  assertEquals(tok.value, "naïve");
 });

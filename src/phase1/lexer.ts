@@ -13,15 +13,11 @@ function isIdentStart(ch: string): boolean {
   if (ch >= "a" && ch <= "z") return true;
   if (ch >= "A" && ch <= "Z") return true;
   if (ch === "_") return true;
-  const cp = ch.codePointAt(0)!;
-  return cp > 127 && /\p{L}/u.test(ch);
+  return false;
 }
 
 function isIdentPart(ch: string): boolean {
-  if (isIdentStart(ch)) return true;
-  if (isDigit(ch)) return true;
-  const cp = ch.codePointAt(0)!;
-  return cp > 127 && /[\p{L}\p{N}\p{M}]/u.test(ch);
+  return isIdentStart(ch) || isDigit(ch);
 }
 
 function isElementwiseOp(ch: string): boolean {
@@ -131,23 +127,16 @@ export class Lexer {
   }
 
   private scanBlockComment(): void {
-    let depth = 1;
-    while (!this.isAtEnd() && depth > 0) {
-      if (this.peek() === "/" && this.peekNext() === "*") {
+    // Per Modelica 3.6 spec: block comments do NOT nest. The first */ ends the comment.
+    while (!this.isAtEnd()) {
+      if (this.peek() === "*" && this.peekNext() === "/") {
         this.advance();
         this.advance();
-        depth++;
-      } else if (this.peek() === "*" && this.peekNext() === "/") {
-        this.advance();
-        this.advance();
-        depth--;
-      } else {
-        this.advance();
+        return;
       }
+      this.advance();
     }
-    if (depth > 0) {
-      throw this.error("Unterminated block comment");
-    }
+    throw this.error("Unterminated block comment");
   }
 
   // ---------------------------------------------------------------------------

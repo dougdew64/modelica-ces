@@ -80,8 +80,8 @@ Error-case tests use `assertThrows` to confirm that the parser throws an `Error`
 | U-PAR-20 | `constant` and `discrete` variability | `"model M constant Real c; end M;"`, `"model M discrete Real d; end M;"` | `variability === "constant"`, `variability === "discrete"` |
 | U-PAR-21 | `input` and `output` causality | `"model M input Real u; end M;"`, `"model M output Real y; end M;"` | `causality === "input"`, `causality === "output"` |
 | U-PAR-22 | `flow` and `stream` prefixes | `"model M flow Real i; end M;"`, `"model M stream Real h; end M;"` | `isFlow === true`, `isStream === true` |
-| U-PAR-23 | Array subscripts in declaration | `"model M Real[3] v; end M;"` | `arraySubscripts.length === 1` |
-| U-PAR-24 | Component with class modification | `"model M Real x(start = 0.0); end M;"` | `modification.classModification !== null`, `classModification.arguments[0].name.parts[0].name === "start"` |
+| U-PAR-23 | Type-level array subscripts in declaration | `"model M Real[3] v; end M;"` | `typeArraySubscripts.length === 1`, `nameArraySubscripts.length === 0` |
+| U-PAR-24 | Component with class modification | `"model M Real x(start = 0.0); end M;"` | `modification.classModification !== null`; first argument narrows to `ElementModification` with `name.parts[0].name === "start"` |
 
 ---
 
@@ -100,7 +100,7 @@ Error-case tests use `assertThrows` to confirm that the parser throws an `Error`
 
 | # | Test | Input | Expected Result |
 |---|------|-------|----------------|
-| U-PAR-29 | Binding expression modification | `"model M Real x = 1.0; end M;"` | `modification.bindingExpression.kind === "RealLiteral"` |
+| U-PAR-29 | Binding expression modification (equals form) | `"model M Real x = 1.0; end M;"` | `modification.binding.kind === "equals"`; `binding.value.kind === "RealLiteral"` |
 | U-PAR-30 | Nested modification | `"model M R1 r(p(v(start = 0))); end M;"` | Three levels of `ClassModification` nesting |
 | U-PAR-31 | `each` and `final` in element modification | `"model M R1[3] r(each final x = 0); end M;"` | `isEach === true`, `isFinal === true` on the `ElementModification` |
 
@@ -156,7 +156,7 @@ All expression tests use a helper `parseExpr(src)` that wraps `src` in `model _M
 | U-PAR-52 | Unary `not` | `"not x"` | `kind === "UnaryExpr"`, `op === "not"` |
 | U-PAR-53 | Binary arithmetic | `"x + y"` | `kind === "BinaryExpr"`, `op === "+"` |
 | U-PAR-54 | Multiplication binds tighter than addition | `"1 + 2 * 3"` | Root is `BinaryExpr(+)`; `right` is `BinaryExpr(*)` |
-| U-PAR-55 | `^` is right-associative | `"2 ^ 3 ^ 4"` | Root is `BinaryExpr(^)`; `right` is `BinaryExpr(^)` |
+| U-PAR-55 | `^` is **non-associative** — `a ^ b` is accepted but `a ^ b ^ c` is rejected | `"2 ^ 3"`, `"2 ^ 3 ^ 4"` | First parses to `BinaryExpr(^)`; second throws an `Error` |
 
 ### Component references and function calls
 
@@ -204,3 +204,36 @@ All expression tests use a helper `parseExpr(src)` that wraps `src` in `model _M
 | # | Test | Input | Expected Result |
 |---|------|-------|----------------|
 | U-PAR-71 | `SpringMassDamper.mo` parses to the expected full structure | File read from `tests/models/SpringMassDamper.mo` | `StoredDefinition` with one `ClassDefinition`; `restriction === "model"`, `name === "SpringMassDamper"`, `elements.length === 5`, one equation section with two `SimpleEquation`s |
+
+---
+
+## 13. Spec Conformance Updates (2026-04-13)
+
+These tests were added to cover the seventeen conformance items enumerated in the parser design document's update summary. Each test exercises a specific grammar construct or behavior that was either missing or incorrect in the original design. They are numbered U-PAR-72 through U-PAR-93 to extend the existing series.
+
+| # | Item | Test | Input | Expected Result |
+|---|------|------|-------|----------------|
+| U-PAR-72 | 2 | Unary sign absorbs multiplication — `-a*b` → `Neg(Mul(a, b))` | `"-a*b"` | `kind === "UnaryExpr"`, `op === "-"`, `operand.kind === "BinaryExpr"` with `op === "*"` |
+| U-PAR-73 | 3 | Multi-component declaration — `Real x, y, z;` produces three component declarations | `"model M Real x, y, z; end M;"` | `elements.length === 3`, names `["x","y","z"]`, all share `typeName.parts[0].name === "Real"` |
+| U-PAR-74 | 3 | Multi-component with per-name modifications and name-level subscripts | `"model M parameter Real a = 1, b[3] = {1,2,3}; end M;"` | Two `parameter` components; second has `nameArraySubscripts.length === 1` |
+| U-PAR-75 | 4 | Type- and name-level array subscripts compose | `"model M Real[2] m[3]; end M;"` | `typeArraySubscripts.length === 1`, `nameArraySubscripts.length === 1` |
+| U-PAR-76 | 5 | Long class with `extends` form | `"model X extends Y(p = 1); Real x; end X;"` | `extending !== null`, `extending.name.parts[0].name === "Y"`, `extending.modification.arguments.length === 1` |
+| U-PAR-77 | 6 | `der`-class-specifier produces `DerClassDefinition` | `"function df = der(f, x);"` | `kind === "DerClassDefinition"`, `baseFunction.parts[0].name === "f"`, `withRespectTo === ["x"]` |
+| U-PAR-78 | 6 | `der`-class-specifier with multiple with-respect-to IDs | `"function df = der(g, x, y);"` | `withRespectTo === ["x", "y"]` |
+| U-PAR-79 | 7 | `initial()` as a primary function-call expression | `"initial()"` | `kind === "FunctionCallExpr"`, `name.parts[0].name === "initial"` |
+| U-PAR-80 | 7 | `pure(f(x))` as a primary function-call expression | `"pure(f(x))"` | `kind === "FunctionCallExpr"`, `name.parts[0].name === "pure"` |
+| U-PAR-81 | 8, 15 | Tuple assignment with empty positions | `"(a, , c) := f(x);"` | `target.components.length === 3`; middle slot is `null` |
+| U-PAR-82 | 8 | Tuple assignment RHS must be a function call | `"(a, b) := x + 1;"` | `Error` thrown |
+| U-PAR-83 | 9 | `redeclare` argument inside a class modification | `"model M R1 r(redeclare Y x); end M;"` | First argument has `kind === "ElementRedeclaration"` |
+| U-PAR-84 | 10 | Element modification carries a description string | `'model M R1 r(p = 1 "documentation"); end M;'` | Argument's `descriptionString === "documentation"` |
+| U-PAR-85 | 11 | Modification expression may be `break` | `"model M R1 r(p = break); end M;"` | Nested binding: `kind === "equals"`, `value === "break"` |
+| U-PAR-86 | 12 | Short class specifier with `input` base-prefix | `"type T = input Real;"` | `basePrefix.isInput === true`, `baseType.parts[0].name === "Real"` |
+| U-PAR-87 | 12 | Open enumeration `enumeration(:)` sets `isOpen` | `"type E = enumeration(:);"` | `isOpen === true`, `enumeration === null` |
+| U-PAR-88 | 13 | Modification with `:=` (assign) form | `"model M R1 r(p := 1); end M;"` | Nested binding's `kind === "assign"` |
+| U-PAR-89 | 14 | Description string concatenation with `+` | `'model M Real x "line one " + "line two"; end M;'` | Component's `comment === "line one line two"` |
+| U-PAR-90 | 16 | Array constructor with `for`-comprehension | `"{i*2 for i in 1:N}"` | `kind === "ArrayConstructExpr"`, `forIterators !== null`, `forIterators[0].name === "i"` |
+| U-PAR-91 | 17 | Function partial application as a positional argument | `"f(function g(x = 1))"` | First positional argument has `kind === "FunctionPartialApplicationExpr"`, `functionName.parts[0].name === "g"`, one named argument |
+| U-PAR-92 | 10 | Constraining clause on a replaceable class definition | `"model M replaceable model X = Y constrainedby Z; end M;"` | Element's `constrainedBy !== null`, `constrainedBy.typeName.parts[0].name === "Z"` |
+| U-PAR-93 | 17 (ordering) | Positional argument after a named argument is rejected | `"f(x = 1, 2)"` | `Error` thrown |
+
+**Item 1 (power non-associativity)** is covered by the updated U-PAR-55 test above. **Item 15 (output-expression-list empty positions)** is covered by U-PAR-81.

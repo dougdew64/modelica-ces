@@ -226,7 +226,7 @@ export interface StoredDefinition {
 
 export interface StoredClassEntry {
   isFinal: boolean;
-  definition: ClassDefinition | ShortClassDefinition;
+  definition: ClassDefinition | ShortClassDefinition | DerClassDefinition;
 }
 
 // --- Class definitions ---
@@ -255,6 +255,8 @@ export interface ClassDefinition {
   isExpandable: boolean;
   isPure: boolean;
   isImpure: boolean;
+  extending: { name: ComponentReference; modification: ClassModification | null } | null;
+  constrainedBy: ConstrainedByClause | null;
   elements: Element[];
   equationSections: EquationSection[];
   algorithmSections: AlgorithmSection[];
@@ -273,10 +275,30 @@ export interface ShortClassDefinition {
   isExpandable: boolean;
   isPure: boolean;
   isImpure: boolean;
+  basePrefix: { isInput: boolean; isOutput: boolean };
+  isOpen: boolean;
   baseType: ComponentReference | null;
   arraySubscripts: Expression[];
   modification: ClassModification | null;
   enumeration: EnumerationLiteral[] | null;
+  constrainedBy: ConstrainedByClause | null;
+  annotation: Annotation | null;
+  comment: string | null;
+}
+
+export interface DerClassDefinition {
+  kind: "DerClassDefinition";
+  span: Span;
+  restriction: ClassRestriction;
+  name: string;
+  isFinal: boolean;
+  isEncapsulated: boolean;
+  isPartial: boolean;
+  isExpandable: boolean;
+  isPure: boolean;
+  isImpure: boolean;
+  baseFunction: ComponentReference;
+  withRespectTo: string[];
   annotation: Annotation | null;
   comment: string | null;
 }
@@ -293,7 +315,9 @@ export type Element =
   | ComponentDeclaration
   | ExtendsClause
   | ImportClause
-  | ClassDefinition;
+  | ClassDefinition
+  | ShortClassDefinition
+  | DerClassDefinition;
 
 export type Visibility = "public" | "protected";
 export type Variability = "parameter" | "constant" | "discrete" | null;
@@ -313,12 +337,25 @@ export interface ComponentDeclaration {
   variability: Variability;
   causality: Causality;
   typeName: ComponentReference;
+  typeArraySubscripts: Expression[];
   name: string;
-  arraySubscripts: Expression[];
+  nameArraySubscripts: Expression[];
   modification: Modification | null;
   conditionAttribute: Expression | null;
   constrainedBy: ConstrainedByClause | null;
   annotation: Annotation | null;
+  comment: string | null;
+}
+
+// Non-recursive component clause used inside redeclarations and replaceables.
+export interface ComponentClause1 {
+  kind: "ComponentClause1";
+  span: Span;
+  typeName: ComponentReference;
+  typeArraySubscripts: Expression[];
+  name: string;
+  nameArraySubscripts: Expression[];
+  modification: Modification | null;
   comment: string | null;
 }
 
@@ -354,13 +391,13 @@ export interface Modification {
   kind: "Modification";
   span: Span;
   classModification: ClassModification | null;
-  bindingExpression: Expression | null;
+  binding: { kind: "equals" | "assign"; value: Expression | "break" } | null;
 }
 
 export interface ClassModification {
   kind: "ClassModification";
   span: Span;
-  arguments: ElementModification[];
+  arguments: (ElementModification | ElementReplaceable | ElementRedeclaration)[];
 }
 
 export interface ElementModification {
@@ -370,6 +407,24 @@ export interface ElementModification {
   isEach: boolean;
   name: ComponentReference;
   modification: Modification | null;
+  descriptionString: string | null;
+}
+
+export interface ElementReplaceable {
+  kind: "ElementReplaceable";
+  span: Span;
+  isEach: boolean;
+  isFinal: boolean;
+  element: ShortClassDefinition | ComponentClause1;
+  constrainedBy: ConstrainedByClause | null;
+}
+
+export interface ElementRedeclaration {
+  kind: "ElementRedeclaration";
+  span: Span;
+  isEach: boolean;
+  isFinal: boolean;
+  element: ShortClassDefinition | ComponentClause1 | ElementReplaceable;
 }
 
 // --- Annotation ---
@@ -472,7 +527,7 @@ export type Statement =
 export type AssignmentTarget = ComponentReference | TupleTarget;
 
 export interface TupleTarget {
-  components: ComponentReference[];
+  components: (ComponentReference | null)[];
 }
 
 export interface AssignmentStatement {
@@ -538,6 +593,7 @@ export type Expression =
   | UnaryExpr
   | IfExpr
   | FunctionCallExpr
+  | FunctionPartialApplicationExpr
   | ArrayConstructExpr
   | ArrayConcatExpr
   | RangeExpr
@@ -613,6 +669,13 @@ export interface FunctionCallExpr {
   args: FunctionArguments;
 }
 
+export interface FunctionPartialApplicationExpr {
+  kind: "FunctionPartialApplicationExpr";
+  span: Span;
+  functionName: ComponentReference;
+  namedArguments: { name: string; value: Expression }[];
+}
+
 export interface FunctionArguments {
   positional: Expression[];
   named: { name: string; value: Expression }[];
@@ -628,6 +691,7 @@ export interface ArrayConstructExpr {
   kind: "ArrayConstructExpr";
   span: Span;
   elements: Expression[];
+  forIterators: ForIterator[] | null;
 }
 
 export interface ArrayConcatExpr {

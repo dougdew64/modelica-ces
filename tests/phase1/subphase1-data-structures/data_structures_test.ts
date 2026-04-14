@@ -7,16 +7,21 @@ import type {
   BinaryExpr,
   ClassDefinition,
   ClassModification,
+  ComponentClause1,
   ComponentDeclaration,
   ComponentReference,
   ConnectEquation,
   ConstrainedByClause,
+  DerClassDefinition,
   ElementModification,
+  ElementRedeclaration,
+  ElementReplaceable,
   EquationSection,
   ExtendsClause,
   ExternalDeclaration,
   FunctionArguments,
   FunctionCallExpr,
+  FunctionPartialApplicationExpr,
   ImportClause,
   Modification,
   ShortClassDefinition,
@@ -257,6 +262,8 @@ Deno.test('U-AST-2: ClassDefinition kind is "ClassDefinition"', () => {
     isExpandable: false,
     isPure: false,
     isImpure: false,
+    extending: null,
+    constrainedBy: null,
     elements: [],
     equationSections: [],
     algorithmSections: [],
@@ -278,10 +285,13 @@ Deno.test('U-AST-3: ShortClassDefinition kind is "ShortClassDefinition"', () => 
     isExpandable: false,
     isPure: false,
     isImpure: false,
+    basePrefix: { isInput: false, isOutput: false },
+    isOpen: false,
     baseType: makeRef(),
     arraySubscripts: [],
     modification: null,
     enumeration: null,
+    constrainedBy: null,
     annotation: null,
     comment: null,
   };
@@ -303,8 +313,9 @@ Deno.test('U-AST-4: ComponentDeclaration kind is "ComponentDeclaration"', () => 
     variability: null,
     causality: null,
     typeName: makeRef(),
+    typeArraySubscripts: [],
     name: "x",
-    arraySubscripts: [],
+    nameArraySubscripts: [],
     modification: null,
     conditionAttribute: null,
     constrainedBy: null,
@@ -354,7 +365,7 @@ Deno.test('U-AST-8: Modification kind is "Modification"', () => {
     kind: "Modification",
     span: makeSpan(),
     classModification: null,
-    bindingExpression: null,
+    binding: null,
   };
   assertEquals(node.kind, "Modification");
 });
@@ -376,6 +387,7 @@ Deno.test('U-AST-10: ElementModification kind is "ElementModification"', () => {
     isEach: false,
     name: makeRef(),
     modification: null,
+    descriptionString: null,
   };
   assertEquals(node.kind, "ElementModification");
 });
@@ -494,4 +506,106 @@ Deno.test('U-AST-20: ExternalDeclaration kind is "ExternalDeclaration"', () => {
     annotation: null,
   };
   assertEquals(node.kind, "ExternalDeclaration");
+});
+
+// =============================================================================
+// AST node types added by the 2026-04-13 spec-conformance update
+// =============================================================================
+
+Deno.test('U-AST-21: DerClassDefinition kind is "DerClassDefinition"', () => {
+  const node: DerClassDefinition = {
+    kind: "DerClassDefinition",
+    span: makeSpan(),
+    restriction: "function",
+    name: "df",
+    isFinal: false,
+    isEncapsulated: false,
+    isPartial: false,
+    isExpandable: false,
+    isPure: false,
+    isImpure: false,
+    baseFunction: makeRef(),
+    withRespectTo: ["x"],
+    annotation: null,
+    comment: null,
+  };
+  assertEquals(node.kind, "DerClassDefinition");
+});
+
+Deno.test('U-AST-22: ElementReplaceable kind is "ElementReplaceable"', () => {
+  const short: ShortClassDefinition = {
+    kind: "ShortClassDefinition",
+    span: makeSpan(),
+    restriction: "type",
+    name: "T",
+    isFinal: false,
+    isEncapsulated: false,
+    isPartial: false,
+    isExpandable: false,
+    isPure: false,
+    isImpure: false,
+    basePrefix: { isInput: false, isOutput: false },
+    isOpen: false,
+    baseType: makeRef(),
+    arraySubscripts: [],
+    modification: null,
+    enumeration: null,
+    constrainedBy: null,
+    annotation: null,
+    comment: null,
+  };
+  const node: ElementReplaceable = {
+    kind: "ElementReplaceable",
+    span: makeSpan(),
+    isEach: false,
+    isFinal: false,
+    element: short,
+    constrainedBy: null,
+  };
+  assertEquals(node.kind, "ElementReplaceable");
+});
+
+Deno.test('U-AST-23: ElementRedeclaration kind is "ElementRedeclaration"', () => {
+  const cc1: ComponentClause1 = {
+    kind: "ComponentClause1",
+    span: makeSpan(),
+    typeName: makeRef(),
+    typeArraySubscripts: [],
+    name: "x",
+    nameArraySubscripts: [],
+    modification: null,
+    comment: null,
+  };
+  const node: ElementRedeclaration = {
+    kind: "ElementRedeclaration",
+    span: makeSpan(),
+    isEach: false,
+    isFinal: false,
+    element: cc1,
+  };
+  assertEquals(node.kind, "ElementRedeclaration");
+});
+
+Deno.test('U-AST-24: ComponentClause1 kind is "ComponentClause1"', () => {
+  const node: ComponentClause1 = {
+    kind: "ComponentClause1",
+    span: makeSpan(),
+    typeName: makeRef(),
+    typeArraySubscripts: [],
+    name: "y",
+    nameArraySubscripts: [],
+    modification: null,
+    comment: null,
+  };
+  assertEquals(node.kind, "ComponentClause1");
+});
+
+Deno.test('U-AST-25: FunctionPartialApplicationExpr kind is "FunctionPartialApplicationExpr"', () => {
+  const node: FunctionPartialApplicationExpr = {
+    kind: "FunctionPartialApplicationExpr",
+    span: makeSpan(),
+    functionName: makeRef(),
+    namedArguments: [],
+  };
+  assertEquals(node.kind, "FunctionPartialApplicationExpr");
 });

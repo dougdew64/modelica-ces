@@ -3,18 +3,24 @@ import { TokenKind } from "./data-structures.ts";
 import type {
   AlgorithmSection,
   Annotation,
+  ArrayConstructExpr,
   AssignmentStatement,
   BinaryOp,
   BreakStatement,
   ClassDefinition,
   ClassModification,
   ClassRestriction,
+  ComponentClause1,
   ComponentDeclaration,
   ComponentReference,
   ComponentReferencePart,
   ConnectEquation,
   ConstrainedByClause,
+  DerClassDefinition,
+  Element,
   ElementModification,
+  ElementRedeclaration,
+  ElementReplaceable,
   EnumerationLiteral,
   EquationNode,
   EquationSection,
@@ -26,8 +32,11 @@ import type {
   ForStatement,
   FunctionArguments,
   FunctionCallEquation,
+  FunctionCallExpr,
   FunctionCallStatement,
+  FunctionPartialApplicationExpr,
   IfEquation,
+  IfExpr,
   IfStatement,
   ImportClause,
   Modification,
@@ -41,6 +50,8 @@ import type {
   StoredDefinition,
   Token,
   UnaryOp,
+  Variability,
+  Causality,
   Visibility,
   WhenEquation,
   WhenStatement,
@@ -48,7 +59,7 @@ import type {
 } from "./data-structures.ts";
 
 // =============================================================================
-// Binding powers for Pratt parser
+// Binding powers for Pratt parser (Modelica 3.6 spec)
 // =============================================================================
 
 const enum BP {
@@ -59,9 +70,25 @@ const enum BP {
   Comparison     = 8,
   Addition       = 10,
   Multiplication = 12,
-  UnarySign      = 14,
-  Power          = 16,
+  Power          = 14,
 }
+
+type Prefixes = {
+  isFinal: boolean;
+  isEncapsulated: boolean;
+  isPartial: boolean;
+  isExpandable: boolean;
+  isPure: boolean;
+  isImpure: boolean;
+};
+
+type ElementPrefixes = {
+  isRedeclare: boolean;
+  isFinal: boolean;
+  isInner: boolean;
+  isOuter: boolean;
+  isReplaceable: boolean;
+};
 
 // =============================================================================
 // Parser
@@ -81,12 +108,8 @@ export class Parser {
   }
 
   // ---------------------------------------------------------------------------
-  // Token consumption primitives
+  // Primitives
   // ---------------------------------------------------------------------------
-
-  private peek(): TokenKind {
-    return this.current.kind;
-  }
 
   private check(kind: TokenKind): boolean {
     return this.current.kind === kind;
@@ -116,22 +139,13 @@ export class Parser {
     );
   }
 
-  // Two-token lookahead: peek at the token after current.
   private peekNextIs(kind: TokenKind): boolean {
     return this.next.kind === kind;
   }
 
-  // ---------------------------------------------------------------------------
-  // Span helpers
-  // ---------------------------------------------------------------------------
-
   private spanFrom(start: SourceLocation): Span {
     return { start, end: this.previous.span.end };
   }
-
-  // ---------------------------------------------------------------------------
-  // Error reporting
-  // ---------------------------------------------------------------------------
 
   private error(message: string): Error {
     const loc = this.current.span.start;
@@ -173,7 +187,9 @@ export class Parser {
   // Class definitions
   // ---------------------------------------------------------------------------
 
-  private parseClassDefinition(isFinal: boolean): ClassDefinition | ShortClassDefinition {
+  private parseClassDefinition(
+    isFinal: boolean,
+  ): ClassDefinition | ShortClassDefinition | DerClassDefinition {
     const start = this.current.span.start;
 
     const isEncapsulated = this.match(TokenKind.Encapsulated);
@@ -182,68 +198,23 @@ export class Parser {
     const isPure         = this.match(TokenKind.Pure);
     const isImpure       = this.match(TokenKind.Impure);
 
+    const prefixes: Prefixes = { isFinal, isEncapsulated, isPartial, isExpandable, isPure, isImpure };
     const restriction = this.parseClassRestriction();
-    const nameToken   = this.expect(TokenKind.Identifier);
-    const name        = nameToken.value as string;
 
+    const nameToken = this.expect(TokenKind.Identifier);
+    const name      = nameToken.value as string;
+
+    // Short class or der class: "=" ...
     if (this.match(TokenKind.Equals)) {
-      return this.parseShortClassBody(start, restriction, name, {
-        isFinal, isEncapsulated, isPartial, isExpandable, isPure, isImpure,
-      });
-    }
-
-    // Optional string comment after class name
-    const _openComment = this.parseOptionalStringComment();
-
-    const elements: import("./data-structures.ts").Element[] = [];
-    const equationSections: EquationSection[] = [];
-    const algorithmSections: AlgorithmSection[] = [];
-    let currentVisibility: Visibility = "public";
-    let externalDecl: ExternalDeclaration | null = null;
-    let annotation: Annotation | null = null;
-
-    while (!this.check(TokenKind.End) && !this.check(TokenKind.EOF)) {
-      if (this.match(TokenKind.Public)) {
-        currentVisibility = "public";
-      } else if (this.match(TokenKind.Protected)) {
-        currentVisibility = "protected";
-      } else if (this.check(TokenKind.Initial) && this.peekNextIs(TokenKind.Equation)) {
-        this.advance(); // consume 'initial'
-        this.advance(); // consume 'equation'
-        equationSections.push(this.parseEquationSection(true));
-      } else if (this.check(TokenKind.Initial) && this.peekNextIs(TokenKind.Algorithm)) {
-        this.advance(); // consume 'initial'
-        this.advance(); // consume 'algorithm'
-        algorithmSections.push(this.parseAlgorithmSection(true));
-      } else if (this.match(TokenKind.Equation)) {
-        equationSections.push(this.parseEquationSection(false));
-      } else if (this.match(TokenKind.Algorithm)) {
-        algorithmSections.push(this.parseAlgorithmSection(false));
-      } else if (this.match(TokenKind.External)) {
-        externalDecl = this.parseExternalDeclaration();
-      } else if (this.check(TokenKind.Annotation)) {
-        annotation = this.parseAnnotation();
-        this.expect(TokenKind.Semicolon);
-      } else {
-        elements.push(this.parseElement(currentVisibility));
+      if (this.match(TokenKind.Der)) {
+        return this.parseDerClassBody(start, restriction, name, prefixes);
       }
+      return this.parseShortClassBody(start, restriction, name, prefixes);
     }
 
-    this.expect(TokenKind.End);
-    const endName = this.expect(TokenKind.Identifier);
-    if ((endName.value as string) !== name) {
-      throw this.error(
-        `Mismatched class name: opened '${name}', closed '${endName.value}'`,
-      );
-    }
-
-    return {
-      kind: "ClassDefinition",
-      span: this.spanFrom(start),
-      restriction, name, isFinal, isEncapsulated, isPartial,
-      isExpandable, isPure, isImpure,
-      elements, equationSections, algorithmSections, externalDecl, annotation,
-    };
+    // Long class body: extending form (first extends in body) is recorded in
+    // `def.extending` as well as added to `elements`.
+    return this.parseLongClassBody(start, restriction, name, prefixes, null);
   }
 
   private parseClassRestriction(): ClassRestriction {
@@ -263,40 +234,182 @@ export class Parser {
     throw this.error("Expected class restriction keyword");
   }
 
+  private parseLongClassBody(
+    start: SourceLocation,
+    restriction: ClassRestriction,
+    name: string,
+    prefixes: Prefixes,
+    extendingIn: { name: ComponentReference; modification: ClassModification | null } | null,
+  ): ClassDefinition {
+    // Optional description string after class header
+    this.parseDescriptionString();
+
+    let extending = extendingIn;
+    const elements: Element[] = [];
+    const equationSections: EquationSection[] = [];
+    const algorithmSections: AlgorithmSection[] = [];
+    let currentVisibility: Visibility = "public";
+    let externalDecl: ExternalDeclaration | null = null;
+    let annotation: Annotation | null = null;
+
+    while (!this.check(TokenKind.End) && !this.check(TokenKind.EOF)) {
+      if (this.match(TokenKind.Public)) {
+        currentVisibility = "public";
+      } else if (this.match(TokenKind.Protected)) {
+        currentVisibility = "protected";
+      } else if (this.check(TokenKind.Initial) && this.peekNextIs(TokenKind.Equation)) {
+        this.advance(); // 'initial'
+        this.advance(); // 'equation'
+        equationSections.push(this.parseEquationSection(true));
+      } else if (this.check(TokenKind.Initial) && this.peekNextIs(TokenKind.Algorithm)) {
+        this.advance(); // 'initial'
+        this.advance(); // 'algorithm'
+        algorithmSections.push(this.parseAlgorithmSection(true));
+      } else if (this.match(TokenKind.Equation)) {
+        equationSections.push(this.parseEquationSection(false));
+      } else if (this.match(TokenKind.Algorithm)) {
+        algorithmSections.push(this.parseAlgorithmSection(false));
+      } else if (this.match(TokenKind.External)) {
+        externalDecl = this.parseExternalDeclaration();
+      } else if (this.check(TokenKind.Annotation)) {
+        annotation = this.parseAnnotation();
+        this.expect(TokenKind.Semicolon);
+      } else {
+        const before = elements.length;
+        this.parseElement(currentVisibility, elements);
+        // Spec: long-class-specifier has a second form beginning with `extends IDENT`.
+        // We recognize it by lifting the first extends clause in the body into the
+        // class definition's `extending` field (it remains in `elements` as well).
+        if (extending === null && elements.length === before + 1) {
+          const el = elements[before];
+          if (el.kind === "ExtendsClause") {
+            extending = {
+              name: el.baseName,
+              modification: el.modification !== null ? el.modification.classModification : null,
+            };
+          }
+        }
+      }
+    }
+
+    this.expect(TokenKind.End);
+    const endName = this.expect(TokenKind.Identifier);
+    if ((endName.value as string) !== name) {
+      throw this.error(
+        `Mismatched class name: opened '${name}', closed '${endName.value}'`,
+      );
+    }
+
+    return {
+      kind: "ClassDefinition",
+      span: this.spanFrom(start),
+      restriction, name,
+      isFinal: prefixes.isFinal,
+      isEncapsulated: prefixes.isEncapsulated,
+      isPartial: prefixes.isPartial,
+      isExpandable: prefixes.isExpandable,
+      isPure: prefixes.isPure,
+      isImpure: prefixes.isImpure,
+      extending,
+      constrainedBy: null, // populated by the caller when wrapped in replaceable ... constrainedby
+      elements, equationSections, algorithmSections, externalDecl, annotation,
+    };
+  }
+
   private parseShortClassBody(
     start: SourceLocation,
     restriction: ClassRestriction,
     name: string,
-    prefixes: {
-      isFinal: boolean; isEncapsulated: boolean; isPartial: boolean;
-      isExpandable: boolean; isPure: boolean; isImpure: boolean;
-    },
+    prefixes: Prefixes,
   ): ShortClassDefinition {
+    // enumeration form
     if (this.match(TokenKind.Enumeration)) {
       this.expect(TokenKind.LParen);
-      const enumeration = this.parseEnumerationList();
+      let isOpen = false;
+      let enumeration: EnumerationLiteral[] | null = null;
+      if (this.match(TokenKind.Colon)) {
+        isOpen = true;
+      } else {
+        enumeration = this.parseEnumerationList();
+      }
       this.expect(TokenKind.RParen);
-      const comment    = this.parseOptionalStringComment();
+      const comment    = this.parseDescriptionString();
       const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
       return {
         kind: "ShortClassDefinition", span: this.spanFrom(start),
-        ...prefixes, restriction, name,
+        restriction, name,
+        isFinal: prefixes.isFinal,
+        isEncapsulated: prefixes.isEncapsulated,
+        isPartial: prefixes.isPartial,
+        isExpandable: prefixes.isExpandable,
+        isPure: prefixes.isPure,
+        isImpure: prefixes.isImpure,
+        basePrefix: { isInput: false, isOutput: false },
+        isOpen,
         baseType: null, arraySubscripts: [], modification: null,
-        enumeration, annotation, comment,
+        enumeration,
+        constrainedBy: null,
+        annotation, comment,
       };
     }
+
+    // type specialisation form: [ base-prefix ] type-specifier [ array-subscripts ] [ class-modification ]
+    const isInput  = this.match(TokenKind.Input);
+    const isOutput = !isInput && this.match(TokenKind.Output);
 
     const baseType       = this.parseComponentReference();
     const arraySubscripts = this.check(TokenKind.LBracket) ? this.parseArraySubscripts() : [];
     const modification   = this.check(TokenKind.LParen) ? this.parseClassModification() : null;
-    const comment        = this.parseOptionalStringComment();
+    const comment        = this.parseDescriptionString();
     const annotation     = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
 
     return {
       kind: "ShortClassDefinition", span: this.spanFrom(start),
-      ...prefixes, restriction, name,
+      restriction, name,
+      isFinal: prefixes.isFinal,
+      isEncapsulated: prefixes.isEncapsulated,
+      isPartial: prefixes.isPartial,
+      isExpandable: prefixes.isExpandable,
+      isPure: prefixes.isPure,
+      isImpure: prefixes.isImpure,
+      basePrefix: { isInput, isOutput },
+      isOpen: false,
       baseType, arraySubscripts, modification,
-      enumeration: null, annotation, comment,
+      enumeration: null,
+      constrainedBy: null,
+      annotation, comment,
+    };
+  }
+
+  private parseDerClassBody(
+    start: SourceLocation,
+    restriction: ClassRestriction,
+    name: string,
+    prefixes: Prefixes,
+  ): DerClassDefinition {
+    // 'der' already consumed
+    this.expect(TokenKind.LParen);
+    const baseFunction = this.parseComponentReference();
+    this.expect(TokenKind.Comma);
+    const withRespectTo: string[] = [];
+    withRespectTo.push(this.expect(TokenKind.Identifier).value as string);
+    while (this.match(TokenKind.Comma)) {
+      withRespectTo.push(this.expect(TokenKind.Identifier).value as string);
+    }
+    this.expect(TokenKind.RParen);
+    const comment    = this.parseDescriptionString();
+    const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
+    return {
+      kind: "DerClassDefinition", span: this.spanFrom(start),
+      restriction, name,
+      isFinal: prefixes.isFinal,
+      isEncapsulated: prefixes.isEncapsulated,
+      isPartial: prefixes.isPartial,
+      isExpandable: prefixes.isExpandable,
+      isPure: prefixes.isPure,
+      isImpure: prefixes.isImpure,
+      baseFunction, withRespectTo,
+      annotation, comment,
     };
   }
 
@@ -314,7 +427,7 @@ export class Parser {
 
   private parseEnumerationLiteral(): EnumerationLiteral {
     const name       = this.expect(TokenKind.Identifier).value as string;
-    const comment    = this.parseOptionalStringComment();
+    const comment    = this.parseDescriptionString();
     const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
     return { name, comment, annotation };
   }
@@ -323,19 +436,23 @@ export class Parser {
   // Elements
   // ---------------------------------------------------------------------------
 
-  private parseElement(visibility: Visibility): import("./data-structures.ts").Element {
+  // parseElement writes directly into the parent's elements array, because one
+  // component-clause can produce multiple ComponentDeclaration entries.
+  private parseElement(visibility: Visibility, out: Element[]): void {
     const start = this.current.span.start;
 
     if (this.match(TokenKind.Import)) {
       const imp = this.parseImportClause(visibility, start);
       this.expect(TokenKind.Semicolon);
-      return imp;
+      out.push(imp);
+      return;
     }
 
     if (this.match(TokenKind.Extends)) {
       const ext = this.parseExtendsClause(visibility, start);
       this.expect(TokenKind.Semicolon);
-      return ext;
+      out.push(ext);
+      return;
     }
 
     const isRedeclare   = this.match(TokenKind.Redeclare);
@@ -346,13 +463,29 @@ export class Parser {
 
     if (this.isClassRestrictionStart()) {
       const classDef = this.parseClassDefinition(isFinal);
+      // Optional constraining clause on a replaceable class
+      let constrainedBy: ConstrainedByClause | null = null;
+      if (isReplaceable && this.match(TokenKind.ConstrainedBy)) {
+        constrainedBy = this.parseConstrainedByClause();
+      }
+      // Attach constrainedBy onto the class node (whichever form it is).
+      if (constrainedBy) {
+        if (classDef.kind === "ClassDefinition") {
+          classDef.constrainedBy = constrainedBy;
+        } else if (classDef.kind === "ShortClassDefinition") {
+          classDef.constrainedBy = constrainedBy;
+        }
+      }
       this.expect(TokenKind.Semicolon);
-      return classDef as unknown as import("./data-structures.ts").ClassDefinition;
+      out.push(classDef);
+      return;
     }
 
-    return this.parseComponentDeclaration(visibility, {
-      isRedeclare, isFinal, isInner, isOuter, isReplaceable,
-    });
+    this.parseComponentClause(
+      visibility,
+      { isRedeclare, isFinal, isInner, isOuter, isReplaceable },
+      out,
+    );
   }
 
   private isClassRestrictionStart(): boolean {
@@ -371,52 +504,64 @@ export class Parser {
   }
 
   // ---------------------------------------------------------------------------
-  // Component declarations
+  // Component clause (may produce multiple ComponentDeclarations)
   // ---------------------------------------------------------------------------
 
-  // Parse a type name: a dotted identifier path with no subscripts on individual parts.
-  // Array dimensions on the type (e.g. Real[3]) are left for the caller to consume.
-  private parseTypeName(): ComponentReference {
-    const isGlobal = this.match(TokenKind.Dot);
-    const parts: ComponentReferencePart[] = [];
-    const firstName = this.expect(TokenKind.Identifier).value as string;
-    parts.push({ name: firstName, subscripts: [] });
-    while (this.check(TokenKind.Dot) && this.next.kind === TokenKind.Identifier) {
-      this.advance(); // consume "."
-      parts.push({ name: this.expect(TokenKind.Identifier).value as string, subscripts: [] });
-    }
-    return { isGlobal, parts };
-  }
-
-  private parseComponentDeclaration(
+  private parseComponentClause(
     visibility: Visibility,
-    prefixes: {
-      isRedeclare: boolean; isFinal: boolean;
-      isInner: boolean; isOuter: boolean; isReplaceable: boolean;
-    },
-  ): ComponentDeclaration {
-    const start = this.current.span.start;
-
+    prefixes: ElementPrefixes,
+    out: Element[],
+  ): void {
     const isFlow   = this.match(TokenKind.Flow);
     const isStream = this.match(TokenKind.Stream);
 
-    let variability: import("./data-structures.ts").Variability = null;
+    let variability: Variability = null;
     if      (this.match(TokenKind.Parameter)) variability = "parameter";
     else if (this.match(TokenKind.Constant))  variability = "constant";
     else if (this.match(TokenKind.Discrete))  variability = "discrete";
 
-    let causality: import("./data-structures.ts").Causality = null;
+    let causality: Causality = null;
     if      (this.match(TokenKind.Input))  causality = "input";
     else if (this.match(TokenKind.Output)) causality = "output";
 
-    const typeName        = this.parseTypeName();
-    const typeSubscripts  = this.check(TokenKind.LBracket) ? this.parseArraySubscripts() : [];
-    const nameToken       = this.expect(TokenKind.Identifier);
-    const name            = nameToken.value as string;
-    const nameSubscripts  = this.check(TokenKind.LBracket) ? this.parseArraySubscripts() : [];
-    const arraySubscripts = [...typeSubscripts, ...nameSubscripts];
+    const typeName = this.parseTypeName();
+    const typeArraySubscripts = this.check(TokenKind.LBracket)
+      ? this.parseArraySubscripts() : [];
 
-    const modification = this.check(TokenKind.LParen) || this.check(TokenKind.Equals)
+    out.push(this.parseSingleComponentDeclaration(
+      visibility, prefixes, isFlow, isStream, variability, causality,
+      typeName, typeArraySubscripts,
+    ));
+    while (this.match(TokenKind.Comma)) {
+      out.push(this.parseSingleComponentDeclaration(
+        visibility, prefixes, isFlow, isStream, variability, causality,
+        typeName, typeArraySubscripts,
+      ));
+    }
+    this.expect(TokenKind.Semicolon);
+  }
+
+  private parseSingleComponentDeclaration(
+    visibility: Visibility,
+    prefixes: ElementPrefixes,
+    isFlow: boolean,
+    isStream: boolean,
+    variability: Variability,
+    causality: Causality,
+    typeName: ComponentReference,
+    typeArraySubscripts: Expression[],
+  ): ComponentDeclaration {
+    const start = this.current.span.start;
+
+    const nameToken = this.expect(TokenKind.Identifier);
+    const name      = nameToken.value as string;
+
+    const nameArraySubscripts = this.check(TokenKind.LBracket)
+      ? this.parseArraySubscripts() : [];
+
+    const modification = this.check(TokenKind.LParen)
+      || this.check(TokenKind.Equals)
+      || this.check(TokenKind.Assign)
       ? this.parseModification() : null;
 
     const conditionAttribute = this.match(TokenKind.If)
@@ -425,18 +570,41 @@ export class Parser {
     const constrainedBy = this.match(TokenKind.ConstrainedBy)
       ? this.parseConstrainedByClause() : null;
 
-    const comment    = this.parseOptionalStringComment();
+    const comment    = this.parseDescriptionString();
     const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
-
-    this.expect(TokenKind.Semicolon);
 
     return {
       kind: "ComponentDeclaration",
       span: this.spanFrom(start),
-      visibility, ...prefixes, isFlow, isStream,
-      variability, causality, typeName, name, arraySubscripts,
+      visibility,
+      isFinal: prefixes.isFinal,
+      isInner: prefixes.isInner,
+      isOuter: prefixes.isOuter,
+      isRedeclare: prefixes.isRedeclare,
+      isReplaceable: prefixes.isReplaceable,
+      isFlow, isStream,
+      variability, causality,
+      typeName, typeArraySubscripts,
+      name, nameArraySubscripts,
       modification, conditionAttribute, constrainedBy, annotation, comment,
     };
+  }
+
+  // Parse a "type name": dotted path, no subscripts at any level.
+  private parseTypeName(): ComponentReference {
+    const isGlobal = this.match(TokenKind.Dot);
+    const parts: ComponentReferencePart[] = [];
+    const firstName = this.expect(TokenKind.Identifier).value as string;
+    parts.push({ name: firstName, subscripts: [] });
+    while (this.check(TokenKind.Dot) && this.next.kind === TokenKind.Identifier) {
+      this.advance(); // "."
+      parts.push({ name: this.expect(TokenKind.Identifier).value as string, subscripts: [] });
+    }
+    return { isGlobal, parts };
+  }
+
+  private parseSimpleName(): ComponentReference {
+    return this.parseTypeName();
   }
 
   // ---------------------------------------------------------------------------
@@ -455,25 +623,22 @@ export class Parser {
     let isWildcard = false;
     let importedNames: string[] | null = null;
 
-    // Alias form: identifier "=" path
     if (this.current.kind === TokenKind.Identifier && this.next.kind === TokenKind.Equals) {
       alias = this.advance().value as string;
-      this.advance(); // consume "="
+      this.advance(); // "="
     }
 
-    // Parse first identifier of path
     const firstId = this.expect(TokenKind.Identifier).value as string;
     const pathParts: ComponentReferencePart[] = [{ name: firstId, subscripts: [] }];
 
-    // Continue parsing dotted path, watching for .* (DotStar token) and .{...}
     if (this.check(TokenKind.DotStar)) {
-      this.advance(); // consume .*
+      this.advance();
       isWildcard = true;
     } else {
       while (this.check(TokenKind.Dot)) {
         if (this.next.kind === TokenKind.LBrace) {
-          this.advance(); // consume "."
-          this.advance(); // consume "{"
+          this.advance(); // "."
+          this.advance(); // "{"
           importedNames = [];
           importedNames.push(this.expect(TokenKind.Identifier).value as string);
           while (this.match(TokenKind.Comma)) {
@@ -482,7 +647,7 @@ export class Parser {
           this.expect(TokenKind.RBrace);
           break;
         } else {
-          this.advance(); // consume "."
+          this.advance(); // "."
           pathParts.push({ name: this.expect(TokenKind.Identifier).value as string, subscripts: [] });
         }
       }
@@ -499,33 +664,144 @@ export class Parser {
   private parseModification(): Modification {
     const start = this.current.span.start;
     const classModification = this.check(TokenKind.LParen) ? this.parseClassModification() : null;
-    const bindingExpression = this.match(TokenKind.Equals) ? this.parseExpression() : null;
-    return { kind: "Modification", span: this.spanFrom(start), classModification, bindingExpression };
+
+    let binding: { kind: "equals" | "assign"; value: Expression | "break" } | null = null;
+    if (this.match(TokenKind.Equals)) {
+      binding = { kind: "equals", value: this.parseModificationExpression() };
+    } else if (this.match(TokenKind.Assign)) {
+      binding = { kind: "assign", value: this.parseModificationExpression() };
+    }
+    return { kind: "Modification", span: this.spanFrom(start), classModification, binding };
+  }
+
+  private parseModificationExpression(): Expression | "break" {
+    if (this.match(TokenKind.Break)) return "break";
+    return this.parseExpression();
   }
 
   private parseClassModification(): ClassModification {
     const start = this.current.span.start;
     this.expect(TokenKind.LParen);
-    const args: ElementModification[] = [];
+    const args: (ElementModification | ElementReplaceable | ElementRedeclaration)[] = [];
     if (!this.check(TokenKind.RParen)) {
-      args.push(this.parseElementModification());
+      args.push(this.parseArgument());
       while (this.match(TokenKind.Comma)) {
         if (this.check(TokenKind.RParen)) break;
-        args.push(this.parseElementModification());
+        args.push(this.parseArgument());
       }
     }
     this.expect(TokenKind.RParen);
     return { kind: "ClassModification", span: this.spanFrom(start), arguments: args };
   }
 
-  private parseElementModification(): ElementModification {
-    const start  = this.current.span.start;
+  private parseArgument(): ElementModification | ElementReplaceable | ElementRedeclaration {
+    const start = this.current.span.start;
+
+    if (this.match(TokenKind.Redeclare)) {
+      return this.parseElementRedeclaration(start);
+    }
+
     const isEach  = this.match(TokenKind.Each);
     const isFinal = this.match(TokenKind.Final);
-    const name    = this.parseComponentReference();
-    const modification = this.check(TokenKind.LParen) || this.check(TokenKind.Equals)
+
+    if (this.match(TokenKind.Replaceable)) {
+      return this.parseElementReplaceable(start, isEach, isFinal);
+    }
+
+    return this.parseElementModification(start, isEach, isFinal);
+  }
+
+  private parseElementModification(
+    start: SourceLocation,
+    isEach: boolean,
+    isFinal: boolean,
+  ): ElementModification {
+    const name = this.parseComponentReference();
+    const modification = this.check(TokenKind.LParen)
+      || this.check(TokenKind.Equals)
+      || this.check(TokenKind.Assign)
       ? this.parseModification() : null;
-    return { kind: "ElementModification", span: this.spanFrom(start), isFinal, isEach, name, modification };
+    const descriptionString = this.parseDescriptionString();
+    return {
+      kind: "ElementModification",
+      span: this.spanFrom(start),
+      isFinal, isEach, name, modification, descriptionString,
+    };
+  }
+
+  private parseElementReplaceable(
+    start: SourceLocation,
+    isEach: boolean,
+    isFinal: boolean,
+  ): ElementReplaceable {
+    const element = this.parseReplaceableOrRedeclarationBody();
+    const constrainedBy = this.match(TokenKind.ConstrainedBy)
+      ? this.parseConstrainedByClause() : null;
+    return {
+      kind: "ElementReplaceable",
+      span: this.spanFrom(start),
+      isEach, isFinal, element, constrainedBy,
+    };
+  }
+
+  private parseElementRedeclaration(start: SourceLocation): ElementRedeclaration {
+    const isEach  = this.match(TokenKind.Each);
+    const isFinal = this.match(TokenKind.Final);
+
+    if (this.match(TokenKind.Replaceable)) {
+      // redeclare [each] [final] element-replaceable
+      const replStart = this.previous.span.start;
+      const er = this.parseElementReplaceable(replStart, false, false);
+      return {
+        kind: "ElementRedeclaration",
+        span: this.spanFrom(start),
+        isEach, isFinal, element: er,
+      };
+    }
+
+    const element = this.parseReplaceableOrRedeclarationBody();
+    return {
+      kind: "ElementRedeclaration",
+      span: this.spanFrom(start),
+      isEach, isFinal, element,
+    };
+  }
+
+  // Parses either a short-class-definition or a component-clause1 as the body
+  // of a `replaceable` or `redeclare` argument.
+  private parseReplaceableOrRedeclarationBody(): ShortClassDefinition | ComponentClause1 {
+    // Heuristic: if the next token looks like a class restriction, parse a
+    // short class definition. Otherwise parse a component-clause1.
+    if (this.isClassRestrictionStart()) {
+      const classDef = this.parseClassDefinition(false);
+      if (classDef.kind !== "ShortClassDefinition") {
+        // The redeclare grammar expects a short class definition here. If we
+        // get a long class definition, surface a clear error.
+        throw this.error("Expected short class definition inside replaceable/redeclare argument");
+      }
+      return classDef;
+    }
+    return this.parseComponentClause1();
+  }
+
+  private parseComponentClause1(): ComponentClause1 {
+    const start = this.current.span.start;
+    const typeName = this.parseTypeName();
+    const typeArraySubscripts = this.check(TokenKind.LBracket)
+      ? this.parseArraySubscripts() : [];
+    const name = this.expect(TokenKind.Identifier).value as string;
+    const nameArraySubscripts = this.check(TokenKind.LBracket)
+      ? this.parseArraySubscripts() : [];
+    const modification = this.check(TokenKind.LParen)
+      || this.check(TokenKind.Equals)
+      || this.check(TokenKind.Assign)
+      ? this.parseModification() : null;
+    const comment = this.parseDescriptionString();
+    return {
+      kind: "ComponentClause1",
+      span: this.spanFrom(start),
+      typeName, typeArraySubscripts, name, nameArraySubscripts, modification, comment,
+    };
   }
 
   private parseConstrainedByClause(): ConstrainedByClause {
@@ -572,20 +848,18 @@ export class Parser {
     const lhs = this.parseExpression();
 
     if (lhs.kind === "FunctionCallExpr" && !this.check(TokenKind.Equals)) {
-      const comment    = this.parseOptionalStringComment();
+      const comment    = this.parseDescriptionString();
       const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
       return {
         kind: "FunctionCallEquation",
         span: this.spanFrom(start),
-        name: (lhs as import("./data-structures.ts").FunctionCallExpr).name,
-        args: (lhs as import("./data-structures.ts").FunctionCallExpr).args,
-        annotation, comment,
+        name: lhs.name, args: lhs.args, annotation, comment,
       } as FunctionCallEquation;
     }
 
     this.expect(TokenKind.Equals);
     const rhs        = this.parseExpression();
-    const comment    = this.parseOptionalStringComment();
+    const comment    = this.parseDescriptionString();
     const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
     return { kind: "SimpleEquation", span: this.spanFrom(start), lhs, rhs, annotation, comment } as SimpleEquation;
   }
@@ -596,7 +870,7 @@ export class Parser {
     this.expect(TokenKind.Comma);
     const to   = this.parseComponentReference();
     this.expect(TokenKind.RParen);
-    const comment    = this.parseOptionalStringComment();
+    const comment    = this.parseDescriptionString();
     const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
     return { kind: "ConnectEquation", span: this.spanFrom(start), from, to, annotation, comment };
   }
@@ -611,7 +885,7 @@ export class Parser {
     }
     this.expect(TokenKind.End);
     this.expect(TokenKind.For);
-    const comment    = this.parseOptionalStringComment();
+    const comment    = this.parseDescriptionString();
     const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
     return { kind: "ForEquation", span: this.spanFrom(start), iterators, equations, annotation, comment };
   }
@@ -649,7 +923,7 @@ export class Parser {
 
     this.expect(TokenKind.End);
     this.expect(TokenKind.If);
-    const comment    = this.parseOptionalStringComment();
+    const comment    = this.parseDescriptionString();
     const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
     return { kind: "IfEquation", span: this.spanFrom(start), branches, elseEquations, annotation, comment };
   }
@@ -679,7 +953,7 @@ export class Parser {
 
     this.expect(TokenKind.End);
     this.expect(TokenKind.When);
-    const comment    = this.parseOptionalStringComment();
+    const comment    = this.parseDescriptionString();
     const annotation = this.check(TokenKind.Annotation) ? this.parseAnnotation() : null;
     return { kind: "WhenEquation", span: this.spanFrom(start), branches, annotation, comment };
   }
@@ -723,17 +997,43 @@ export class Parser {
 
   private parseTupleAssignment(start: SourceLocation): AssignmentStatement {
     this.expect(TokenKind.LParen);
-    const components: ComponentReference[] = [];
-    if (!this.check(TokenKind.RParen)) {
+    const components: (ComponentReference | null)[] = [];
+
+    if (this.check(TokenKind.Comma) || this.check(TokenKind.RParen)) {
+      components.push(null);
+    } else {
       components.push(this.parseComponentReference());
-      while (this.match(TokenKind.Comma)) {
+    }
+    while (this.match(TokenKind.Comma)) {
+      if (this.check(TokenKind.Comma) || this.check(TokenKind.RParen)) {
+        components.push(null);
+      } else {
         components.push(this.parseComponentReference());
       }
     }
     this.expect(TokenKind.RParen);
     this.expect(TokenKind.Assign);
-    const value = this.parseExpression();
-    return { kind: "AssignmentStatement", span: this.spanFrom(start), target: { components }, value };
+
+    // RHS must be a function call: component-reference function-call-args
+    const fnStart = this.current.span.start;
+    const fnName = this.parseComponentReference();
+    if (!this.check(TokenKind.LParen)) {
+      throw this.error("Right-hand side of tuple assignment must be a function call");
+    }
+    const args = this.parseFunctionArguments();
+    const value: FunctionCallExpr = {
+      kind: "FunctionCallExpr",
+      span: this.spanFrom(fnStart),
+      name: fnName,
+      args,
+    };
+
+    return {
+      kind: "AssignmentStatement",
+      span: this.spanFrom(start),
+      target: { components },
+      value,
+    };
   }
 
   private parseIfStatement(start: SourceLocation): IfStatement {
@@ -868,7 +1168,7 @@ export class Parser {
   }
 
   // ---------------------------------------------------------------------------
-  // Annotations and string comments
+  // Annotations and description strings
   // ---------------------------------------------------------------------------
 
   private parseAnnotation(): Annotation {
@@ -878,11 +1178,15 @@ export class Parser {
     return { kind: "Annotation", span: this.spanFrom(start), classModification };
   }
 
-  private parseOptionalStringComment(): string | null {
-    if (this.check(TokenKind.StringLiteral)) {
-      return this.advance().value as string;
+  // description-string := [ STRING { "+" STRING } ]
+  private parseDescriptionString(): string | null {
+    if (!this.check(TokenKind.StringLiteral)) return null;
+    let result = this.advance().value as string;
+    while (this.check(TokenKind.Plus) && this.peekNextIs(TokenKind.StringLiteral)) {
+      this.advance(); // "+"
+      result += this.advance().value as string;
     }
-    return null;
+    return result;
   }
 
   // ---------------------------------------------------------------------------
@@ -959,11 +1263,12 @@ export class Parser {
     } else if (this.match(TokenKind.BooleanLiteral)) {
       left = { kind: "BooleanLiteral", span: this.spanFrom(start), value: this.previous.value as boolean };
     } else if (this.match(TokenKind.Not)) {
-      const operand = this.parseExpression(BP.Not);
+      const operand = this.parseExpression(BP.Comparison);
       left = { kind: "UnaryExpr", span: this.spanFrom(start), op: "not", operand };
     } else if (this.check(TokenKind.Minus) || this.check(TokenKind.Plus)) {
+      // Spec: unary sign's operand is parsed at multiplication level — absorbs *, /, ^.
       const op = this.advance().kind === TokenKind.Minus ? "-" : "+";
-      const operand = this.parseExpression(BP.UnarySign);
+      const operand = this.parseExpression(BP.Multiplication);
       left = { kind: "UnaryExpr", span: this.spanFrom(start), op: op as UnaryOp, operand };
     } else if (this.match(TokenKind.LParen)) {
       left = this.parseExpression();
@@ -976,6 +1281,16 @@ export class Parser {
       left = this.parseIfExpression(start);
     } else if (this.match(TokenKind.End)) {
       left = { kind: "EndExpr", span: this.spanFrom(start) };
+    } else if (this.check(TokenKind.Initial) || this.check(TokenKind.Pure)) {
+      // Spec: ( initial | pure ) function-call-args as a primary expression
+      const keyword = this.advance().kind === TokenKind.Initial ? "initial" : "pure";
+      const args = this.parseFunctionArguments();
+      left = {
+        kind: "FunctionCallExpr",
+        span: this.spanFrom(start),
+        name: { isGlobal: false, parts: [{ name: keyword, subscripts: [] }] },
+        args,
+      };
     } else if (
       this.check(TokenKind.Identifier) || this.check(TokenKind.Dot) || this.check(TokenKind.Der)
     ) {
@@ -991,6 +1306,12 @@ export class Parser {
       const op      = this.tokenToOp(opToken);
       const right   = this.parseExpression(bp.right);
       left = { kind: "BinaryExpr", span: this.spanFrom(start), op, left, right };
+      // Power is non-associative per spec: `factor := primary [ "^" primary ]`.
+      // Reject chaining like `a ^ b ^ c`.
+      if ((op === "^" || op === ".^")
+          && (this.check(TokenKind.Power) || this.check(TokenKind.DotPower))) {
+        throw this.error("Power operator is non-associative; use parentheses");
+      }
     }
 
     return left;
@@ -1021,7 +1342,7 @@ export class Parser {
     return { kind: "ComponentReference", span: this.spanFrom(start), ref };
   }
 
-  private parseIfExpression(start: SourceLocation): import("./data-structures.ts").IfExpr {
+  private parseIfExpression(start: SourceLocation): IfExpr {
     const condition = this.parseExpression();
     this.expect(TokenKind.Then);
     const thenExpr = this.parseExpression();
@@ -1040,17 +1361,23 @@ export class Parser {
     return { kind: "IfExpr", span: this.spanFrom(start), condition, thenExpr, elseIfs, elseExpr };
   }
 
-  private parseArrayConstruct(start: SourceLocation): import("./data-structures.ts").ArrayConstructExpr {
+  private parseArrayConstruct(start: SourceLocation): ArrayConstructExpr {
     const elements: Expression[] = [];
+    let forIterators: ForIterator[] | null = null;
+
     if (!this.check(TokenKind.RBrace)) {
       elements.push(this.parseExpression());
-      while (this.match(TokenKind.Comma)) {
-        if (this.check(TokenKind.RBrace)) break;
-        elements.push(this.parseExpression());
+      if (this.match(TokenKind.For)) {
+        forIterators = this.parseForIterators();
+      } else {
+        while (this.match(TokenKind.Comma)) {
+          if (this.check(TokenKind.RBrace)) break;
+          elements.push(this.parseExpression());
+        }
       }
     }
     this.expect(TokenKind.RBrace);
-    return { kind: "ArrayConstructExpr", span: this.spanFrom(start), elements };
+    return { kind: "ArrayConstructExpr", span: this.spanFrom(start), elements, forIterators };
   }
 
   private parseArrayConcat(start: SourceLocation): import("./data-structures.ts").ArrayConcatExpr {
@@ -1099,17 +1426,59 @@ export class Parser {
     positional: Expression[],
     named: { name: string; value: Expression }[],
   ): void {
+    let seenNamed = false;
     while (true) {
       if (this.check(TokenKind.RParen)) break;
 
       if (this.current.kind === TokenKind.Identifier && this.next.kind === TokenKind.Equals) {
         const name = this.advance().value as string;
-        this.advance(); // consume "="
+        this.advance(); // "="
         named.push({ name, value: this.parseExpression() });
+        seenNamed = true;
+      } else if (this.check(TokenKind.Function)) {
+        if (seenNamed) {
+          throw this.error("Positional argument after named argument is not allowed");
+        }
+        positional.push(this.parseFunctionPartialApplication());
       } else {
+        if (seenNamed) {
+          throw this.error("Positional argument after named argument is not allowed");
+        }
         positional.push(this.parseExpression());
       }
 
+      if (!this.match(TokenKind.Comma)) break;
+    }
+  }
+
+  private parseFunctionPartialApplication(): FunctionPartialApplicationExpr {
+    const start = this.current.span.start;
+    this.expect(TokenKind.Function);
+    const functionName = this.parseTypeName();
+    this.expect(TokenKind.LParen);
+    const namedArguments: { name: string; value: Expression }[] = [];
+    if (!this.check(TokenKind.RParen)) {
+      this.parseNamedOnlyArgumentList(namedArguments);
+    }
+    this.expect(TokenKind.RParen);
+    return {
+      kind: "FunctionPartialApplicationExpr",
+      span: this.spanFrom(start),
+      functionName, namedArguments,
+    };
+  }
+
+  private parseNamedOnlyArgumentList(
+    named: { name: string; value: Expression }[],
+  ): void {
+    while (true) {
+      if (this.check(TokenKind.RParen)) break;
+      if (!(this.current.kind === TokenKind.Identifier && this.next.kind === TokenKind.Equals)) {
+        throw this.error("Expected named argument");
+      }
+      const name = this.advance().value as string;
+      this.advance(); // "="
+      named.push({ name, value: this.parseExpression() });
       if (!this.match(TokenKind.Comma)) break;
     }
   }
@@ -1143,7 +1512,8 @@ export class Parser {
         return { left: BP.Multiplication, right: BP.Multiplication + 1 };
       case TokenKind.Power:
       case TokenKind.DotPower:
-        return { left: BP.Power, right: BP.Power - 1 }; // right-associative
+        // Non-associative per spec: `factor := primary [ "^" primary ]`
+        return { left: BP.Power, right: BP.Power + 1 };
       default:
         return null;
     }
@@ -1172,7 +1542,4 @@ export class Parser {
       default: throw this.error(`Not a binary operator: ${TokenKind[token.kind]}`);
     }
   }
-
-  // Suppress unused variable warning for peek()
-  private _peek = this.peek.bind(this);
 }
